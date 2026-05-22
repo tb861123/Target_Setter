@@ -536,7 +536,7 @@ class ALevelALISEngine:
 
     def __init__(
         self,
-        alis_lookup,            # ALISLookup instance
+        alis_lookup,            # ALISLookup instance (default percentile)
         subject_list_df: pd.DataFrame,
         yellis_df: pd.DataFrame | None = None,
         gcse_wide_df: pd.DataFrame | None = None,
@@ -545,8 +545,10 @@ class ALevelALISEngine:
         gcse_blend_weight: float = 0.0,  # 0 = pure ALIS, 1 = pure GCSE composite
         dept_adjustments: dict[str, float] | None = None,
         profile_overrides: dict | None = None,
+        subject_lookups: dict | None = None,  # subject → lookup override
     ):
         self.lookup = alis_lookup
+        self.subject_lookups = subject_lookups or {}
         self.subject_list = subject_list_df.copy()
         self.yellis_df = yellis_df
         self.gcse_wide_df = gcse_wide_df
@@ -555,6 +557,10 @@ class ALevelALISEngine:
         self.gcse_blend_weight = gcse_blend_weight
         self.dept_adjustments = dept_adjustments or {}
         self.profile_overrides = profile_overrides or {}
+
+    def _get_lookup(self, subject: str):
+        """Return the lookup for a subject, respecting per-subject percentile overrides."""
+        return self.subject_lookups.get(subject, self.lookup)
 
     def generate(self) -> pd.DataFrame:
         all_subjects: set[str] = set()
@@ -595,10 +601,12 @@ class ALevelALISEngine:
             if not eligible_idx:
                 continue
 
+            subj_lookup = self._get_lookup(subject)
+
             if self.mode == "direct":
                 for idx in eligible_idx:
                     key = students_df.at[idx, "_key"]
-                    grade = self.lookup.get_grade(key, subject)
+                    grade = subj_lookup.get_grade(key, subject)
                     if grade is None:
                         unmatched.add(f"{students_df.at[idx, 'surname']} {students_df.at[idx, 'forename']}")
                         targets[subject][idx] = "N/A"
@@ -613,7 +621,7 @@ class ALevelALISEngine:
                 scores: dict[int, float] = {}
                 for idx in eligible_idx:
                     key = students_df.at[idx, "_key"]
-                    grade = self.lookup.get_grade(key, subject)
+                    grade = subj_lookup.get_grade(key, subject)
                     num = self.GRADE_NUM.get(grade, 3) if grade else 3
                     scores[idx] = float(num)
 

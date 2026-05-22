@@ -131,6 +131,36 @@ def _do_alevel_generate() -> None:
                 else:
                     lookup = alis_lookup
 
+                # Build per-subject lookups for percentile overrides
+                subject_pct_overrides = st.session_state.get("al_subject_pct_overrides", {})
+                subject_lookups: dict = {}
+                for _subj, _pct in subject_pct_overrides.items():
+                    if _pct == chosen_pct:
+                        continue  # same as global, skip
+                    _sl = ALISLookup(
+                        data=st.session_state["al_alis_data"],
+                        percentile=_pct,
+                        proxy_map=proxy_map,
+                        key_remap=_extract_remap("ALIS Adapt"),
+                    )
+                    if gcse_base is not None:
+                        _gcse_pct = st.session_state.get("al_gcse_baseline_percentile", _pct)
+                        _gl = ALISLookup(
+                            data=gcse_base,
+                            percentile=_gcse_pct,
+                            proxy_map=proxy_map,
+                            key_remap=_extract_remap("GCSE Baseline"),
+                        )
+                        _alis_w = st.session_state.get("al_alis_blend_weight", 0.5)
+                        subject_lookups[_subj] = ALISBlendedLookup(
+                            alis_lookup=_sl,
+                            gcse_lookup=_gl,
+                            alis_weight=_alis_w,
+                            gcse_weight=1.0 - _alis_w,
+                        )
+                    else:
+                        subject_lookups[_subj] = _sl
+
                 engine = ALevelALISEngine(
                     alis_lookup=lookup,
                     subject_list_df=st.session_state["al_subject_list_df"],
@@ -140,6 +170,7 @@ def _do_alevel_generate() -> None:
                     distribution=st.session_state.get("distribution", {}),
                     dept_adjustments=st.session_state.get("dept_adjustments", {}),
                     profile_overrides=st.session_state.get("profile_overrides", {}),
+                    subject_lookups=subject_lookups,
                 )
             elif has_composite:
                 engine = ALevelTargetEngine(
@@ -258,6 +289,74 @@ def _render_weight_editor(weights: dict, key_prefix: str) -> dict:
     return new_weights
 
 
+_FORMAT_HINTS = {
+    "yellis_gcse": (
+        "📋 **Expected format — Yellis GCSE file (.xlsx)**\n\n"
+        "- Sheet name: **Sheet1**\n"
+        "- First 3 rows are headers — data starts row 4\n"
+        "- Columns (in order): Surname, Forename, Form, Sex, Overall Score, Overall Band, "
+        "Vocab Score, Vocab Band, Maths Score, Maths Band, Patterns Score, Patterns Band, Range\n\n"
+        "_This is the standard Yellis GCSE export from CEM — upload as downloaded._"
+    ),
+    "yellis_alevel": (
+        "📋 **Expected format — Yellis A Level file (.xlsx)**\n\n"
+        "- Sheet name: **Data**\n"
+        "- First 3 rows are headers — data starts row 4\n"
+        "- Columns (in order): Code, Surname, Firstname, Gender, DOB, Overall Score, "
+        "Overall Band, Vocab Score, Vocab Band, Maths Score, Maths Band, Nonverbal Score, "
+        "Nonverbal Band\n\n"
+        "_This is the standard Yellis A Level export from CEM — upload as downloaded._"
+    ),
+    "gcse_grades": (
+        "📋 **Expected format — GCSE Grades file (.xlsx)**\n\n"
+        "- Sheet name: **iSams import**\n"
+        "- Header row is row **2** (row 1 is blank/title)\n"
+        "- Required columns: **Surname**, **Forename**, **Subject**, **Grade**\n"
+        "- Long format: one row per student × subject\n"
+        "- Surname and Forename can be blank (forward-filled from the first row per student)\n\n"
+        "_Export from iSams: Reports → Data Export → GCSE Grades Import format._"
+    ),
+    "subject_list": (
+        "📋 **Expected format — Subject List (CSV or .xlsx)**\n\n"
+        "Two formats are supported:\n\n"
+        "**Long format** (one subjects column):\n"
+        "| Surname | Forename | Subjects |\n"
+        "|---------|----------|----------|\n"
+        "| Smith | Alice | Mathematics, Physics, Chemistry |\n\n"
+        "**Wide format** (one column per subject, 1/Y/X = taking it):\n"
+        "| Surname | Forename | Mathematics | Physics | Art |\n"
+        "|---------|----------|-------------|---------|-----|\n"
+        "| Smith | Alice | 1 | 1 | |\n\n"
+        "_Column headers must include Surname and Forename (or Last Name / First Name)._"
+    ),
+    "alis_adapt": (
+        "📋 **Expected format — ALIS Adapt file (.xls or .xlsx)**\n\n"
+        "- Multi-sheet file from **CEM ALIS Adapt**\n"
+        "- Required sheets (any subset): 50th Percentile, 75th Percentile, 90th Percentile, "
+        "97th Percentile, 99th Percentile\n"
+        "- Each sheet has: **StudentName** (format: 'Surname, Firstname'), **baseline**, "
+        "then one column per subject\n\n"
+        "_Upload the file exactly as downloaded from the CEM ALIS platform._"
+    ),
+    "gcse_baseline": (
+        "📋 **Expected format — GCSE Baseline Predictions file (.xls or .xlsx)**\n\n"
+        "- Same structure as the ALIS Adapt file but uses **mean GCSE score** as the predictor\n"
+        "- Multi-sheet from **CEM ALIS Adapt** (GCSE baseline variant)\n"
+        "- Sheets: 50th Percentile through 99th Percentile\n"
+        "- Columns: StudentName, baseline (GCSE mean, 1–9 scale), subject predictions\n\n"
+        "_Upload the file exactly as downloaded from CEM._"
+    ),
+}
+
+
+def _format_hint(key: str) -> None:
+    """Render a collapsible format hint for a given file type."""
+    hint = _FORMAT_HINTS.get(key)
+    if hint:
+        with st.expander("Expected format ▶", expanded=False):
+            st.markdown(hint)
+
+
 def _progress_bar(step: int) -> None:
     steps = ["Upload Data", "Configure", "Generate Targets", "Review Matrix", "Export"]
     progress_pct = (step + 1) / len(steps)
@@ -304,6 +403,8 @@ def _init_state() -> None:
         "al_gcse_baseline_percentile": "75th",
         # Blending weight: 0 = pure GCSE baseline, 1 = pure ALIS test
         "al_alis_blend_weight": 0.5,
+        # Per-subject percentile overrides e.g. {"Further Mathematics": "90th"}
+        "al_subject_pct_overrides": {},
         "distribution": {},
         "use_subscores": False,
         "subscore_weights": {},
@@ -425,6 +526,7 @@ if mode == "GCSE":
 
         with col1:
             st.subheader("Yellis Baseline (Year 10)")
+            _format_hint("yellis_gcse")
             yellis_file = st.file_uploader(
                 "Upload Yellis GCSE Excel (.xlsx)",
                 type=["xlsx"],
@@ -446,6 +548,7 @@ if mode == "GCSE":
 
         with col2:
             st.subheader("Student Subject List")
+            _format_hint("subject_list")
             subj_file = st.file_uploader(
                 "Upload subject list (CSV or Excel)",
                 type=["csv", "xlsx", "xls"],
@@ -730,6 +833,7 @@ else:
             "Upload the ALIS Adapt XLS file containing percentile grade predictions "
             "per student per subject. This is the most accurate basis for A Level targets."
         )
+        _format_hint("alis_adapt")
         alis_file = st.file_uploader(
             "Upload ALIS Adapt file (.xls or .xlsx)",
             type=["xls", "xlsx"],
@@ -766,6 +870,7 @@ else:
             except Exception as e:
                 st.error(f"Error parsing ALIS Adapt file: {e}")
 
+        _format_hint("gcse_baseline")
         gcse_base_file = st.file_uploader(
             "Upload GCSE Baseline Predictions file (.xls or .xlsx) — optional",
             type=["xls", "xlsx"],
@@ -801,6 +906,7 @@ else:
         with col1:
             st.subheader("Yellis Baseline (Year 12)")
             st.caption("Required for GCSE-composite mode; also provides baseline scores for ALIS mode.")
+            _format_hint("yellis_alevel")
             yellis_file = st.file_uploader(
                 "Upload Yellis A Level Excel (.xlsx)",
                 type=["xlsx"],
@@ -822,6 +928,7 @@ else:
         with col2:
             st.subheader("GCSE Grades (iSams)")
             st.caption("Required for GCSE-composite mode.")
+            _format_hint("gcse_grades")
             gcse_file = st.file_uploader(
                 "Upload GCSE grades Excel (.xlsx)",
                 type=["xlsx"],
@@ -845,6 +952,7 @@ else:
         with col3:
             st.subheader("Student Subject List")
             st.caption("Required for all modes — links students to their A Level subjects.")
+            _format_hint("subject_list")
             subj_file = st.file_uploader(
                 "Upload subject list (CSV or Excel)",
                 type=["csv", "xlsx", "xls"],
@@ -1078,6 +1186,47 @@ else:
                         st.caption(
                             "Direct mode uses the ALIS prediction at the chosen percentile exactly "
                             "as the target grade. Department adjustments can still shift grades up/down."
+                        )
+
+                    st.divider()
+                    st.markdown("**Per-subject percentile overrides**")
+                    st.caption(
+                        "Override the global percentile for individual subjects — e.g. target "
+                        "Further Maths at 90th while keeping everything else at 75th."
+                    )
+
+                    _spo = dict(st.session_state.get("al_subject_pct_overrides", {}))
+                    _subjs_in_alis = sorted(
+                        s for s in subjects_in_use2 if s in alis_subj_cols
+                    )
+
+                    with st.expander(
+                        f"Subject-level overrides"
+                        + (f" ({len(_spo)} set)" if _spo else " (none set)"),
+                        expanded=bool(_spo),
+                    ):
+                        _changed_spo = False
+                        _cols_spo = st.columns(min(3, max(1, len(_subjs_in_alis))))
+                        for _si, _subj in enumerate(_subjs_in_alis):
+                            _curr_pct = _spo.get(_subj, "(use global)")
+                            _opts = ["(use global)"] + pct_options
+                            _idx = _opts.index(_curr_pct) if _curr_pct in _opts else 0
+                            with _cols_spo[_si % len(_cols_spo)]:
+                                _sel = st.selectbox(
+                                    _subj,
+                                    _opts,
+                                    index=_idx,
+                                    key=f"subj_pct_{_subj}",
+                                )
+                            if _sel == "(use global)":
+                                _spo.pop(_subj, None)
+                            else:
+                                _spo[_subj] = _sel
+                    st.session_state["al_subject_pct_overrides"] = _spo
+                    if _spo:
+                        st.caption(
+                            "Overrides: "
+                            + ", ".join(f"**{s}** → {v}" for s, v in sorted(_spo.items()))
                         )
 
                     st.divider()

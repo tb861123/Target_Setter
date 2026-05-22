@@ -27,6 +27,27 @@ BAND_C_FILL = PatternFill(start_color="FFCC99", end_color="FFCC99", fill_type="s
 BAND_D_FILL = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
 FOOTER_FILL = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
 
+_AL_DEPT_FILLS = {
+    "A*": PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid"),
+    "A":  PatternFill(start_color="CCFF99", end_color="CCFF99", fill_type="solid"),
+    "B":  PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid"),
+    "C":  PatternFill(start_color="FFCC99", end_color="FFCC99", fill_type="solid"),
+    "D":  PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid"),
+    "E":  PatternFill(start_color="FF9999", end_color="FF9999", fill_type="solid"),
+}
+
+_GCSE_DEPT_FILLS = {
+    9: PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid"),
+    8: PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid"),
+    7: PatternFill(start_color="CCFF99", end_color="CCFF99", fill_type="solid"),
+    6: PatternFill(start_color="CCFF99", end_color="CCFF99", fill_type="solid"),
+    5: PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid"),
+    4: PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid"),
+    3: PatternFill(start_color="FFCC99", end_color="FFCC99", fill_type="solid"),
+    2: PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid"),
+    1: PatternFill(start_color="FF9999", end_color="FF9999", fill_type="solid"),
+}
+
 
 def _is_blank(val) -> bool:
     """Return True if val is NA, None, empty string, or pd.NA."""
@@ -50,12 +71,74 @@ def _auto_fit_columns(ws, min_width: int = 6, max_width: int = 30) -> None:
         ws.column_dimensions[col_letter].width = max(min_width, min(length + 2, max_width))
 
 
+def _add_dept_sheet(
+    wb,
+    title: str,
+    students: list[dict],
+    grade_fills: dict,
+    amber_overrides: bool = False,
+    year_str: str = "",
+) -> None:
+    """Add a per-department sheet to the workbook.
+
+    Parameters
+    ----------
+    wb:
+        The openpyxl Workbook to add the sheet to.
+    title:
+        Sheet name (truncated to 31 chars to satisfy Excel's limit).
+    students:
+        List of dicts with keys: surname, forename, grade, and optionally overridden.
+    grade_fills:
+        Mapping from grade value to PatternFill.
+    amber_overrides:
+        When True, cells where student["overridden"] is True receive AMBER_FILL.
+    year_str:
+        Academic year string used in the title cell.
+    """
+    sheet_title = title[:31]
+    ws = wb.create_sheet(sheet_title)
+
+    # Row 1: title merged across cols A-C
+    title_cell = ws.cell(row=1, column=1, value=f"Emanuel School — {title} — {year_str}")
+    title_cell.font = Font(bold=True, size=13)
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=3)
+
+    # Row 3: headers
+    for col_idx, header in enumerate(["Surname", "Forename", "Target"], start=1):
+        cell = ws.cell(row=3, column=col_idx, value=header)
+        cell.fill = HEADER_FILL
+        cell.font = HEADER_FONT
+        cell.alignment = Alignment(horizontal="center")
+
+    # Rows 4+: student data sorted alphabetically
+    sorted_students = sorted(students, key=lambda s: (str(s.get("surname", "")), str(s.get("forename", ""))))
+
+    for r_idx, student in enumerate(sorted_students, start=4):
+        ws.cell(row=r_idx, column=1, value=str(student.get("surname", "")))
+        ws.cell(row=r_idx, column=2, value=str(student.get("forename", "")))
+
+        grade = student.get("grade", "")
+        grade_cell = ws.cell(row=r_idx, column=3, value=grade)
+        grade_cell.alignment = Alignment(horizontal="center")
+
+        # Determine fill
+        if amber_overrides and student.get("overridden", False):
+            grade_cell.fill = AMBER_FILL
+        else:
+            fill = grade_fills.get(grade)
+            if fill is not None:
+                grade_cell.fill = fill
+
+    _auto_fit_columns(ws)
+
+
 def export_gcse(
     targets_df: pd.DataFrame,
     overrides: dict | None = None,
     academic_year: str = "",
 ) -> bytes:
-    """Generate two-sheet Excel for GCSE targets. Returns bytes."""
+    """Generate Excel for GCSE targets with per-subject department sheets. Returns bytes."""
     overrides = overrides or {}
     subject_cols = [
         c for c in targets_df.columns
@@ -147,9 +230,90 @@ def export_gcse(
 
     _auto_fit_columns(ws2)
 
+    # Per-subject department sheets
+    for subj in subject_cols:
+        dept_students = []
+        for _, row in df_sorted.sort_values(["surname", "forename"]).iterrows():
+            val = row.get(subj)
+            if not _is_blank(val) and str(val) not in ("N/A", ""):
+                student_key = f"{row['surname']}|{row['forename']}"
+                overridden = (
+                    student_key in overrides
+                    and subj in overrides.get(student_key, {})
+                )
+                # Convert grade to int for fill lookup where possible
+                grade_key = val
+                try:
+                    grade_key = int(val)
+                except (ValueError, TypeError):
+                    pass
+                dept_students.append({
+                    "surname": str(row.get("surname", "")),
+                    "forename": str(row.get("forename", "")),
+                    "grade": str(val),
+                    "_grade_key": grade_key,
+                    "overridden": overridden,
+                })
+        if dept_students:
+            # Build a fills dict keyed by the string grade value for _add_dept_sheet,
+            # but also support int-keyed _GCSE_DEPT_FILLS via _grade_key on each student.
+            # We pass a string-keyed proxy and handle int lookup inside a wrapper.
+            _add_dept_sheet_gcse(
+                wb,
+                subj,
+                dept_students,
+                _GCSE_DEPT_FILLS,
+                year_str=year_str,
+            )
+
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+def _add_dept_sheet_gcse(
+    wb,
+    title: str,
+    students: list[dict],
+    grade_fills: dict,
+    year_str: str = "",
+) -> None:
+    """Add a per-department GCSE sheet, using int-keyed grade fills."""
+    sheet_title = title[:31]
+    ws = wb.create_sheet(sheet_title)
+
+    title_cell = ws.cell(row=1, column=1, value=f"Emanuel School — {title} — {year_str}")
+    title_cell.font = Font(bold=True, size=13)
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=3)
+
+    for col_idx, header in enumerate(["Surname", "Forename", "Target"], start=1):
+        cell = ws.cell(row=3, column=col_idx, value=header)
+        cell.fill = HEADER_FILL
+        cell.font = HEADER_FONT
+        cell.alignment = Alignment(horizontal="center")
+
+    sorted_students = sorted(
+        students,
+        key=lambda s: (str(s.get("surname", "")), str(s.get("forename", ""))),
+    )
+
+    for r_idx, student in enumerate(sorted_students, start=4):
+        ws.cell(row=r_idx, column=1, value=str(student.get("surname", "")))
+        ws.cell(row=r_idx, column=2, value=str(student.get("forename", "")))
+
+        grade = student.get("grade", "")
+        grade_cell = ws.cell(row=r_idx, column=3, value=grade)
+        grade_cell.alignment = Alignment(horizontal="center")
+
+        if student.get("overridden", False):
+            grade_cell.fill = AMBER_FILL
+        else:
+            grade_key = student.get("_grade_key", grade)
+            fill = grade_fills.get(grade_key)
+            if fill is not None:
+                grade_cell.fill = fill
+
+    _auto_fit_columns(ws)
 
 
 def export_alevel(
@@ -157,7 +321,7 @@ def export_alevel(
     overrides: dict | None = None,
     academic_year: str = "",
 ) -> bytes:
-    """Generate two-sheet Excel for A Level targets. Returns bytes."""
+    """Generate Excel for A Level targets with per-subject department sheets. Returns bytes."""
     overrides = overrides or {}
     subject_cols = [
         c for c in targets_df.columns
@@ -243,6 +407,32 @@ def export_alevel(
         ws2.append(list(r))
 
     _auto_fit_columns(ws2)
+
+    # Per-subject department sheets
+    for subj in subject_cols:
+        dept_students = []
+        for _, row in df_sorted.sort_values(["surname", "forename"]).iterrows():
+            val = row.get(subj)
+            if not _is_blank(val) and str(val) not in ("N/A", ""):
+                student_key = f"{row['surname']}|{row['forename']}"
+                dept_students.append({
+                    "surname": str(row.get("surname", "")),
+                    "forename": str(row.get("forename", "")),
+                    "grade": str(val),
+                    "overridden": (
+                        student_key in overrides
+                        and subj in overrides.get(student_key, {})
+                    ),
+                })
+        if dept_students:
+            _add_dept_sheet(
+                wb,
+                subj,
+                dept_students,
+                _AL_DEPT_FILLS,
+                amber_overrides=True,
+                year_str=year_str,
+            )
 
     buf = io.BytesIO()
     wb.save(buf)
