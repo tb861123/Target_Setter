@@ -321,3 +321,167 @@ def render_validation_warnings(warnings: list[str], missing_students: list[str])
                      "They will be excluded from target generation.")
             for s in missing_students:
                 st.write(f"- {s}")
+
+
+def render_matching_dashboard(
+    master_keys: list[str],
+    source_keys: dict[str, list[str]],
+    ss_key: str = "match_overrides",
+    key_prefix: str = "md_",
+) -> None:
+    """
+    Display cross-source student matching status and correction controls.
+    Reads and writes match overrides via st.session_state[ss_key].
+
+    Args:
+        master_keys:  list of 'surname|forename' keys from the subject list (source of truth)
+        source_keys:  {'Source Name': [keys...]} for each uploaded data source
+        ss_key:       session_state key under which overrides dict is stored
+        key_prefix:   prefix for all widget keys (avoids collisions between GCSE/A Level)
+    """
+    from matching import match_sources, issues_only, summary_counts, STATUS_ICON
+
+    if not master_keys or not source_keys:
+        return
+
+    current_overrides: dict[str, str] = st.session_state.get(ss_key, {})
+    sources = list(source_keys.keys())
+
+    report = match_sources(master_keys, source_keys, manual_overrides=current_overrides)
+    counts = summary_counts(report, sources)
+
+    st.markdown("#### Student Matching Status")
+
+    # Per-source summary metrics
+    metric_cols = st.columns(len(sources))
+    for i, src in enumerate(sources):
+        c = counts.get(src, {})
+        n_ok = c.get("exact", 0) + c.get("normalised", 0) + c.get("manual", 0)
+        n_warn = c.get("fuzzy", 0) + c.get("possible", 0)
+        n_bad = c.get("unmatched", 0)
+        total = len(master_keys)
+        with metric_cols[i]:
+            if n_warn + n_bad == 0:
+                st.metric(src, f"{n_ok}/{total}", delta="All matched", delta_color="off")
+            else:
+                st.metric(
+                    src,
+                    f"{n_ok}/{total} matched",
+                    delta=f"{n_warn + n_bad} issue(s)",
+                    delta_color="inverse",
+                )
+
+    issues = issues_only(report, sources)
+
+    if issues.empty:
+        st.success("All students matched across all sources.")
+        return
+
+    st.warning(f"{len(issues)} student(s) have potential matching issues.")
+
+    # Issues summary table
+    tbl_rows = []
+    for _, row in issues.iterrows():
+        r: dict = {"Student": row["display_name"]}
+        for src in sources:
+            status = row.get(f"{src}_status", "n/a")
+            icon = STATUS_ICON.get(status, "?")
+            suggestion = row.get(f"{src}_suggestion")
+            score = row.get(f"{src}_score", 0.0)
+            if status in ("exact", "normalised", "manual"):
+                r[src] = f"{icon}"
+            elif status in ("fuzzy", "possible") and suggestion:
+                r[src] = f"{icon} {suggestion} ({score:.0%})"
+            elif status == "unmatched":
+                r[src] = "❌ not found"
+            else:
+                r[src] = icon
+        tbl_rows.append(r)
+
+    st.dataframe(pd.DataFrame(tbl_rows), use_container_width=True, hide_index=True)
+
+    # Correction controls
+    with st.expander("Fix Matching Issues", expanded=True):
+        st.caption(
+            "For each issue, select the correct student from the source data, "
+            "or mark as unmatched to exclude from lookups."
+        )
+
+        for _, row in issues.iterrows():
+            mkey = row["master_key"]
+            student_name = row["display_name"]
+
+            issue_srcs = [
+                s for s in sources
+                if row.get(f"{s}_status") in ("fuzzy", "possible", "unmatched")
+            ]
+            if not issue_srcs:
+                continue
+
+            st.markdown(f"**{student_name}**")
+            fix_cols = st.columns(len(issue_srcs))
+
+            for ci, src in enumerate(issue_srcs):
+                status = row.get(f"{src}_status")
+                suggestion = row.get(f"{src}_suggestion")
+                s_keys = sorted(source_keys.get(src, []))
+                override_key = f"{src}::{mkey}"
+                wkey = f"{key_prefix}{src}_{mkey}"
+
+                options = ["(no change)"] + s_keys + ["(mark as unmatched)"]
+
+                # Determine pre-fill value
+                saved = current_overrides.get(override_key)
+                if saved == "__UNMATCHED__":
+                    default = "(mark as unmatched)"
+                elif saved and saved in s_keys:
+                    default = saved
+                elif suggestion and suggestion in s_keys:
+                    default = suggestion
+                else:
+                    default = "(no change)"
+
+                if wkey not in st.session_state:
+                    st.session_state[wkey] = default
+
+                with fix_cols[ci]:
+                    st.selectbox(
+                        f"{src}",
+                        options,
+                        key=wkey,
+                        help=(
+                            f"Status: {status}"
+                            + (f" — suggested: {suggestion}" if suggestion else "")
+                        ),
+                    )
+
+        if st.button("Save Matching Corrections", key=f"{key_prefix}save", type="primary"):
+            new_overrides = dict(current_overrides)
+            for _, row in issues.iterrows():
+                mkey = row["master_key"]
+                issue_srcs = [
+                    s for s in sources
+                    if row.get(f"{s}_status") in ("fuzzy", "possible", "unmatched")
+                ]
+                for src in issue_srcs:
+                    override_key = f"{src}::{mkey}"
+                    wkey = f"{key_prefix}{src}_{mkey}"
+                    sel = st.session_state.get(wkey, "(no change)")
+                    if sel == "(no change)":
+                        new_overrides.pop(override_key, None)
+                    elif sel == "(mark as unmatched)":
+                        new_overrides[override_key] = "__UNMATCHED__"
+                    else:
+                        new_overrides[override_key] = sel
+            st.session_state[ss_key] = new_overrides
+            st.success("Matching corrections saved.")
+            st.rerun()
+
+        if current_overrides:
+            if st.button(
+                "Clear All Matching Corrections",
+                key=f"{key_prefix}clear",
+                type="secondary",
+            ):
+                st.session_state[ss_key] = {}
+                st.rerun()

@@ -42,6 +42,7 @@ from ui_components import (
     render_gcse_matrix,
     render_alevel_matrix,
     render_validation_warnings,
+    render_matching_dashboard,
 )
 
 # ---------------------------------------------------------------------------
@@ -92,11 +93,22 @@ def _do_alevel_generate() -> None:
                 proxy_map = dict(DEFAULT_PROXY_MAP)
                 proxy_map.update(st.session_state.get("al_alis_proxy_map", {}))
                 chosen_pct = st.session_state.get("al_alis_percentile", "75th")
+                match_overrides = st.session_state.get("match_overrides", {})
+
+                # Build key remaps from confirmed match corrections
+                def _extract_remap(source_prefix: str) -> dict[str, str]:
+                    prefix = f"{source_prefix}::"
+                    return {
+                        k[len(prefix):]: v
+                        for k, v in match_overrides.items()
+                        if k.startswith(prefix) and v != "__UNMATCHED__"
+                    }
 
                 alis_lookup = ALISLookup(
                     data=st.session_state["al_alis_data"],
                     percentile=chosen_pct,
                     proxy_map=proxy_map,
+                    key_remap=_extract_remap("ALIS Adapt"),
                 )
 
                 # If GCSE baseline file is also loaded, blend the two
@@ -107,6 +119,7 @@ def _do_alevel_generate() -> None:
                         data=gcse_base,
                         percentile=gcse_pct,
                         proxy_map=proxy_map,
+                        key_remap=_extract_remap("GCSE Baseline"),
                     )
                     alis_w = st.session_state.get("al_alis_blend_weight", 0.5)
                     lookup = ALISBlendedLookup(
@@ -301,6 +314,7 @@ def _init_state() -> None:
         "profile_overrides": {},
         "targets_df": None,
         "overrides": {},
+        "match_overrides": {},
         "session_name": "Default",
         "_confirm_regen": False,
     }
@@ -463,23 +477,28 @@ if mode == "GCSE":
             st.session_state.get("gcse_yellis_df") is not None
             and st.session_state.get("gcse_subject_list_df") is not None
         ):
-            yellis_keys = set(
-                st.session_state["gcse_yellis_df"]["surname"].str.strip().str.lower()
+            st.divider()
+            # Build matching inputs
+            _gcse_yw = st.session_state["gcse_yellis_df"]
+            _gcse_sl = st.session_state["gcse_subject_list_df"]
+            _gcse_master = (
+                _gcse_sl["surname"].str.strip().str.lower()
                 + "|"
-                + st.session_state["gcse_yellis_df"]["forename"].str.strip().str.lower()
+                + _gcse_sl["forename"].str.strip().str.lower()
+            ).tolist()
+            _gcse_src_keys = {
+                "Yellis": (
+                    _gcse_yw["surname"].str.strip().str.lower()
+                    + "|"
+                    + _gcse_yw["forename"].str.strip().str.lower()
+                ).tolist(),
+            }
+            render_matching_dashboard(
+                master_keys=_gcse_master,
+                source_keys=_gcse_src_keys,
+                ss_key="match_overrides",
+                key_prefix="gcse_md_",
             )
-            sl = st.session_state["gcse_subject_list_df"]
-            missing = [
-                f"{r['surname']} {r['forename']}"
-                for _, r in sl.iterrows()
-                if (r["surname"].strip().lower() + "|" + r["forename"].strip().lower())
-                not in yellis_keys
-            ]
-            st.session_state["gcse_missing_students"] = missing
-            if missing:
-                render_validation_warnings([], missing)
-            else:
-                st.success("All students in the subject list were found in the Yellis data.")
 
             _nav_buttons(back=False, forward_label="Next: Configure →", forward_key="gcse_s0")
 
@@ -864,43 +883,48 @@ else:
         all_ready = has_subj and (has_alis or has_composite)
 
         if all_ready:
-            # Cross-validate subject list against available data
             sl = st.session_state["al_subject_list_df"]
+            al_master_keys = (
+                sl["surname"].str.strip().str.lower()
+                + "|"
+                + sl["forename"].str.strip().str.lower()
+            ).tolist()
+
+            # Build source key dicts for matching
+            al_source_keys: dict[str, list[str]] = {}
 
             if has_alis:
                 alis_data = st.session_state["al_alis_data"]
-                sample_df = next(iter(alis_data.values()))
-                alis_keys = set(sample_df["_key"].tolist())
-                sl_keys_missing = [
-                    f"{r['surname']} {r['forename']}"
-                    for _, r in sl.iterrows()
-                    if (r["surname"].strip().lower() + "|" + r["forename"].strip().lower())
-                    not in alis_keys
-                ]
-                if sl_keys_missing:
-                    st.warning(
-                        f"{len(sl_keys_missing)} students in subject list not found in ALIS data "
-                        f"(will show as N/A): {', '.join(sl_keys_missing[:5])}"
-                        + (" ..." if len(sl_keys_missing) > 5 else "")
-                    )
-                else:
-                    st.success("All students matched in ALIS Adapt data.")
+                _adf = next(iter(alis_data.values()))
+                al_source_keys["ALIS Adapt"] = _adf["_key"].tolist()
 
-            if has_composite and st.session_state.get("al_yellis_df") is not None:
-                yellis_keys = set(
-                    st.session_state["al_yellis_df"]["surname"].str.strip().str.lower()
+            if st.session_state.get("al_gcse_baseline_data") is not None:
+                _gbdf = next(iter(st.session_state["al_gcse_baseline_data"].values()))
+                al_source_keys["GCSE Baseline"] = _gbdf["_key"].tolist()
+
+            if st.session_state.get("al_yellis_df") is not None:
+                _ydf = st.session_state["al_yellis_df"]
+                al_source_keys["Yellis"] = (
+                    _ydf["surname"].str.strip().str.lower()
                     + "|"
-                    + st.session_state["al_yellis_df"]["firstname"].str.strip().str.lower()
-                )
-                missing_yellis = [
-                    f"{r['surname']} {r['forename']}"
-                    for _, r in sl.iterrows()
-                    if (r["surname"].strip().lower() + "|" + r["forename"].strip().lower())
-                    not in yellis_keys
-                ]
-                st.session_state["al_missing_students"] = missing_yellis
-                if missing_yellis:
-                    render_validation_warnings([], missing_yellis)
+                    + _ydf["firstname"].str.strip().str.lower()
+                ).tolist()
+
+            if st.session_state.get("al_gcse_wide_df") is not None:
+                _gdf = st.session_state["al_gcse_wide_df"]
+                al_source_keys["GCSE Grades"] = (
+                    _gdf["Surname"].str.strip().str.lower()
+                    + "|"
+                    + _gdf["Forename"].str.strip().str.lower()
+                ).tolist()
+
+            st.divider()
+            render_matching_dashboard(
+                master_keys=al_master_keys,
+                source_keys=al_source_keys,
+                ss_key="match_overrides",
+                key_prefix="al_md_",
+            )
 
             _nav_buttons(back=False, forward_label="Next: Configure →", forward_key="al_s0")
 
@@ -1196,11 +1220,13 @@ else:
     elif step == 2:
         st.header("Step 3 — Generate Targets")
 
-        all_ready = (
+        _has_subj_s2 = st.session_state.get("al_subject_list_df") is not None
+        _has_alis_s2 = st.session_state.get("al_alis_data") is not None
+        _has_composite_s2 = (
             st.session_state.get("al_yellis_df") is not None
             and st.session_state.get("al_gcse_wide_df") is not None
-            and st.session_state.get("al_subject_list_df") is not None
         )
+        all_ready = _has_subj_s2 and (_has_alis_s2 or _has_composite_s2)
 
         if not all_ready:
             st.warning("Please complete data upload first.")

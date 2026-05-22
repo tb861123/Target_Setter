@@ -2,7 +2,22 @@
 
 from __future__ import annotations
 
+import re
+import unicodedata
+
 import pandas as pd
+
+
+def _norm_key(key: str) -> str:
+    """Normalise a surname|forename key: lowercase, strip accents/hyphens/apostrophes."""
+    key = key.lower().strip()
+    key = "".join(
+        c for c in unicodedata.normalize("NFD", key)
+        if unicodedata.category(c) != "Mn"
+    )
+    parts = key.split("|", 1)
+    normed = [re.sub(r"[-''.`\s]", "", p) for p in parts]
+    return "|".join(normed)
 
 # ---------------------------------------------------------------------------
 # Percentile sheet labels (as they appear in the file)
@@ -142,6 +157,10 @@ def parse_alis_adapt(file) -> tuple[dict[str, pd.DataFrame], list[str]]:
                 warnings.append(f"Sheet '{sheet}': ALIS column '{alis_col}' not found.")
                 df[app_name] = None
 
+        # Deduplicate on _key: keep row with highest (non-NaN) baseline
+        df = df.sort_values("baseline", ascending=False, na_position="last")
+        df = df.drop_duplicates(subset=["_key"], keep="first")
+
         # Short label for the percentile (e.g. "75th")
         label = sheet.replace(" Percentile", "")
         data[label] = df.reset_index(drop=True)
@@ -167,21 +186,27 @@ class ALISLookup:
         data: dict[str, pd.DataFrame],
         percentile: str = "75th",
         proxy_map: dict[str, str] | None = None,
+        key_remap: dict[str, str] | None = None,
     ):
         self.data = data
         self.percentile = percentile
         self.proxy_map = proxy_map if proxy_map is not None else DEFAULT_PROXY_MAP.copy()
+        self.key_remap = key_remap or {}
         self._build_index()
 
     def _build_index(self) -> None:
-        """Build a key→row dict for fast lookups."""
+        """Build key→row and normalised-key→row dicts for fast lookups."""
         self._index: dict[str, pd.Series] = {}
+        self._norm_index: dict[str, pd.Series] = {}
         df = self.data.get(self.percentile)
         if df is None:
             return
         for _, row in df.iterrows():
             key = str(row["_key"])
             self._index[key] = row
+            norm = _norm_key(key)
+            if norm not in self._norm_index:
+                self._norm_index[norm] = row
 
     @property
     def available_subjects(self) -> list[str]:
@@ -190,11 +215,19 @@ class ALISLookup:
             return []
         return [c for c in df.columns if c not in ("_key", "_name", "baseline")]
 
+    def _resolve_row(self, name_key: str) -> pd.Series | None:
+        """Look up a student row by key, with remap and normalised fallback."""
+        lookup_key = self.key_remap.get(name_key, name_key)
+        row = self._index.get(lookup_key)
+        if row is None:
+            row = self._norm_index.get(_norm_key(lookup_key))
+        return row
+
     def get_grade(self, name_key: str, subject: str) -> str | None:
         """
         Return ALIS-predicted grade letter for student (name_key = "surname|firstname")
         and subject (app name). Returns None if not found or not enrolled.
-        Applies proxy mapping automatically.
+        Applies proxy mapping and normalised key fallback automatically.
         """
         # Resolve proxy if needed
         lookup_subject = subject
@@ -205,7 +238,7 @@ class ALISLookup:
             else:
                 return None
 
-        row = self._index.get(name_key)
+        row = self._resolve_row(name_key)
         if row is None:
             return None
 
@@ -223,7 +256,7 @@ class ALISLookup:
         return str(val).strip()
 
     def get_baseline(self, name_key: str) -> float | None:
-        row = self._index.get(name_key)
+        row = self._resolve_row(name_key)
         if row is None:
             return None
         v = row.get("baseline")
@@ -236,8 +269,8 @@ class ALISLookup:
         return list(self._index.keys())
 
     def unmatched_keys(self, student_keys: list[str]) -> list[str]:
-        """Return student keys that have no ALIS entry."""
-        return [k for k in student_keys if k not in self._index]
+        """Return student keys that have no ALIS entry (including normalised fallback)."""
+        return [k for k in student_keys if self._resolve_row(k) is None]
 
 
 # ---------------------------------------------------------------------------
