@@ -1,4 +1,4 @@
-"""File parsing logic for Yellis GCSE, Yellis A Level, GCSE grades, and subject lists."""
+"""File parsing logic for Yellis GCSE, Yellis A Level, GCSE grades, subject lists, and ALIS Adapt."""
 
 from __future__ import annotations
 
@@ -299,3 +299,13 @@ def match_students(
     merged = merged.drop(columns=dup_cols)
 
     return merged, unmatched
+
+
+# ---------------------------------------------------------------------------
+# ALIS Adapt file (re-exported convenience wrapper)
+# ---------------------------------------------------------------------------
+
+def parse_alis_adapt(file):
+    """Parse ALIS Adapt XLS/XLSX percentile file. Returns (data_by_percentile, warnings)."""
+    from alis_adapter import parse_alis_adapt as _parse
+    return _parse(file)

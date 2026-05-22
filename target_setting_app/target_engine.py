@@ -509,6 +509,148 @@ def compute_gcse_summary(targets_df: pd.DataFrame, subject_cols: list[str]) -> p
     return pd.DataFrame(rows)
 
 
+# ---------------------------------------------------------------------------
+# ALIS-based A Level Target Engine
+# ---------------------------------------------------------------------------
+
+class ALevelALISEngine:
+    """
+    Generates A Level targets using ALIS Adapt percentile predictions as the
+    primary signal.  Two modes are available:
+
+    * direct  — use the ALIS grade at the chosen percentile as the target, then
+                apply dept adjustment.  Simple and faithful to what ALIS produces.
+    * ranked  — convert the ALIS grade to a numeric ranking score, rank students
+                per subject, then apply the school's own distribution curve
+                (same as ALevelTargetEngine but seeded by ALIS rather than
+                composite scores).  Useful when the school wants to impose a
+                specific grade profile that differs from the national distribution.
+
+    Fallback: students/subjects with no ALIS entry fall back to ALevelTargetEngine
+    composite scoring when gcse_wide_df and the subject_list profile are provided.
+    """
+
+    GRADE_NUM = {"A*": 6, "A": 5, "B": 4, "C": 3, "D": 2, "E": 1}
+    GRADE_STR = {v: k for k, v in GRADE_NUM.items()}
+    GRADES_DESC = [6, 5, 4, 3, 2, 1]
+
+    def __init__(
+        self,
+        alis_lookup,            # ALISLookup instance
+        subject_list_df: pd.DataFrame,
+        yellis_df: pd.DataFrame | None = None,
+        gcse_wide_df: pd.DataFrame | None = None,
+        mode: str = "direct",   # "direct" | "ranked"
+        distribution: dict[str, float] | None = None,  # used only in ranked mode
+        gcse_blend_weight: float = 0.0,  # 0 = pure ALIS, 1 = pure GCSE composite
+        dept_adjustments: dict[str, float] | None = None,
+        profile_overrides: dict | None = None,
+    ):
+        self.lookup = alis_lookup
+        self.subject_list = subject_list_df.copy()
+        self.yellis_df = yellis_df
+        self.gcse_wide_df = gcse_wide_df
+        self.mode = mode
+        self.distribution = distribution or {}
+        self.gcse_blend_weight = gcse_blend_weight
+        self.dept_adjustments = dept_adjustments or {}
+        self.profile_overrides = profile_overrides or {}
+
+    def generate(self) -> pd.DataFrame:
+        all_subjects: set[str] = set()
+        for subjects in self.subject_list["subjects"]:
+            all_subjects.update(subjects)
+        all_subjects = sorted(all_subjects)
+
+        # Build student base list
+        sl = self.subject_list.copy()
+        sl["_key"] = (
+            sl["surname"].str.strip().str.lower()
+            + "|"
+            + sl["forename"].str.strip().str.lower()
+        )
+
+        rows = []
+        for _, student in sl.iterrows():
+            key = student["_key"]
+            baseline = self.lookup.get_baseline(key)
+            rows.append({
+                "surname": student["surname"],
+                "forename": student["forename"],
+                "year_group": "Year 12",
+                "overall_score": baseline,
+                "_key": key,
+                "_subjects": student.get("subjects", []),
+            })
+
+        students_df = pd.DataFrame(rows)
+
+        targets: dict[str, list] = {s: [pd.NA] * len(students_df) for s in all_subjects}
+        unmatched: set[str] = set()
+
+        for subject in all_subjects:
+            mask_takes = students_df["_subjects"].apply(lambda s: subject in s)
+            eligible_idx = students_df[mask_takes].index.tolist()
+
+            if not eligible_idx:
+                continue
+
+            if self.mode == "direct":
+                for idx in eligible_idx:
+                    key = students_df.at[idx, "_key"]
+                    grade = self.lookup.get_grade(key, subject)
+                    if grade is None:
+                        unmatched.add(f"{students_df.at[idx, 'surname']} {students_df.at[idx, 'forename']}")
+                        targets[subject][idx] = "N/A"
+                    else:
+                        adj = self.dept_adjustments.get(subject, 0.0)
+                        num = self.GRADE_NUM.get(grade, 3)
+                        num = max(1, min(6, round(num + adj)))
+                        targets[subject][idx] = self.GRADE_STR[num]
+
+            else:
+                # ranked mode: convert ALIS grade to numeric score, rank, apply dist
+                scores: dict[int, float] = {}
+                for idx in eligible_idx:
+                    key = students_df.at[idx, "_key"]
+                    grade = self.lookup.get_grade(key, subject)
+                    num = self.GRADE_NUM.get(grade, 3) if grade else 3
+                    scores[idx] = float(num)
+
+                marginal = self._cumulative_to_marginal(self.distribution)
+                ranked_idx = sorted(scores, key=scores.__getitem__, reverse=True)
+                n = len(ranked_idx)
+                assigned = _assign_grades_by_distribution(n, marginal, self.GRADES_DESC)
+
+                for pos, idx in enumerate(ranked_idx):
+                    raw = assigned[pos]
+                    adj = self.dept_adjustments.get(subject, 0.0)
+                    num = max(1, min(6, round(raw + adj)))
+                    targets[subject][idx] = self.GRADE_STR[num]
+
+        result = students_df[["surname", "forename", "year_group", "overall_score"]].copy()
+        for subject in all_subjects:
+            result[subject] = targets[subject]
+
+        return result.reset_index(drop=True)
+
+    def _cumulative_to_marginal(self, cum_pct: dict[str, float]) -> dict[int, float]:
+        labels = ["A*", "A*-A", "A*-B", "A*-C", "A*-D", "A*-E"]
+        cum_vals = [cum_pct.get(lbl, 0) / 100 for lbl in labels]
+        marginal: dict[int, float] = {}
+        prev = 0.0
+        for i, g in enumerate(range(6, 0, -1)):
+            if i < len(cum_vals):
+                marginal[g] = max(0.0, cum_vals[i] - prev)
+                prev = cum_vals[i]
+            else:
+                marginal[g] = 0.0
+        total = sum(marginal.values())
+        if total > 0:
+            marginal = {k: v / total for k, v in marginal.items()}
+        return marginal
+
+
 def compute_alevel_summary(targets_df: pd.DataFrame, subject_cols: list[str]) -> pd.DataFrame:
     bands = [
         ("A*", ["A*"]),
