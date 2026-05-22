@@ -238,3 +238,78 @@ class ALISLookup:
     def unmatched_keys(self, student_keys: list[str]) -> list[str]:
         """Return student keys that have no ALIS entry."""
         return [k for k in student_keys if k not in self._index]
+
+
+# ---------------------------------------------------------------------------
+# Blended lookup: merges ALIS-test predictions with GCSE-baseline predictions
+# ---------------------------------------------------------------------------
+
+_GRADE_NUM = {"A*": 6, "A": 5, "B": 4, "C": 3, "D": 2, "E": 1}
+_GRADE_STR = {v: k for k, v in _GRADE_NUM.items()}
+
+
+class ALISBlendedLookup:
+    """
+    Blends per-student grade predictions from two ALISLookup instances:
+      • alis_lookup  — predictions based on ALIS aptitude test score
+      • gcse_lookup  — predictions based on mean GCSE score
+
+    For each student × subject, both numeric predictions are combined:
+        blended = alis_weight × alis_num + gcse_weight × gcse_num
+
+    When only one source has a prediction, that source is used alone.
+    This object satisfies the same interface as ALISLookup so it is a
+    drop-in replacement inside ALevelALISEngine.
+    """
+
+    def __init__(
+        self,
+        alis_lookup: ALISLookup,
+        gcse_lookup: ALISLookup,
+        alis_weight: float = 0.5,
+        gcse_weight: float = 0.5,
+    ):
+        self.alis_lookup = alis_lookup
+        self.gcse_lookup = gcse_lookup
+        self.alis_weight = alis_weight
+        self.gcse_weight = gcse_weight
+        # Normalise weights
+        total = alis_weight + gcse_weight
+        if total > 0:
+            self.alis_weight = alis_weight / total
+            self.gcse_weight = gcse_weight / total
+
+    @property
+    def available_subjects(self) -> list[str]:
+        a = set(self.alis_lookup.available_subjects)
+        g = set(self.gcse_lookup.available_subjects)
+        return sorted(a | g)
+
+    def get_grade(self, name_key: str, subject: str) -> str | None:
+        ag = self.alis_lookup.get_grade(name_key, subject)
+        gg = self.gcse_lookup.get_grade(name_key, subject)
+
+        if ag is None and gg is None:
+            return None
+        if ag is None:
+            return gg
+        if gg is None:
+            return ag
+
+        an = _GRADE_NUM.get(ag, 3)
+        gn = _GRADE_NUM.get(gg, 3)
+        blended = self.alis_weight * an + self.gcse_weight * gn
+        return _GRADE_STR[max(1, min(6, round(blended)))]
+
+    def get_baseline(self, name_key: str) -> float | None:
+        """Return ALIS test score as the primary baseline (for display/sorting)."""
+        return self.alis_lookup.get_baseline(name_key)
+
+    def all_keys(self) -> list[str]:
+        a = set(self.alis_lookup.all_keys())
+        g = set(self.gcse_lookup.all_keys())
+        return list(a | g)
+
+    def unmatched_keys(self, student_keys: list[str]) -> list[str]:
+        all_known = set(self.all_keys())
+        return [k for k in student_keys if k not in all_known]

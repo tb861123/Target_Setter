@@ -28,6 +28,7 @@ from target_engine import (
 )
 from alis_adapter import (
     ALISLookup,
+    ALISBlendedLookup,
     PERCENTILE_LABELS,
     DEFAULT_PROXY_MAP,
     ALIS_COVERED_SUBJECTS,
@@ -90,12 +91,33 @@ def _do_alevel_generate() -> None:
             if has_alis:
                 proxy_map = dict(DEFAULT_PROXY_MAP)
                 proxy_map.update(st.session_state.get("al_alis_proxy_map", {}))
+                chosen_pct = st.session_state.get("al_alis_percentile", "75th")
 
-                lookup = ALISLookup(
+                alis_lookup = ALISLookup(
                     data=st.session_state["al_alis_data"],
-                    percentile=st.session_state.get("al_alis_percentile", "75th"),
+                    percentile=chosen_pct,
                     proxy_map=proxy_map,
                 )
+
+                # If GCSE baseline file is also loaded, blend the two
+                gcse_base = st.session_state.get("al_gcse_baseline_data")
+                if gcse_base is not None:
+                    gcse_pct = st.session_state.get("al_gcse_baseline_percentile", chosen_pct)
+                    gcse_lookup = ALISLookup(
+                        data=gcse_base,
+                        percentile=gcse_pct,
+                        proxy_map=proxy_map,
+                    )
+                    alis_w = st.session_state.get("al_alis_blend_weight", 0.5)
+                    lookup = ALISBlendedLookup(
+                        alis_lookup=alis_lookup,
+                        gcse_lookup=gcse_lookup,
+                        alis_weight=alis_w,
+                        gcse_weight=1.0 - alis_w,
+                    )
+                else:
+                    lookup = alis_lookup
+
                 engine = ALevelALISEngine(
                     alis_lookup=lookup,
                     subject_list_df=st.session_state["al_subject_list_df"],
@@ -147,6 +169,53 @@ def _do_alevel_generate() -> None:
         except Exception as e:
             st.error(f"Error generating targets: {e}")
             raise
+
+
+def _render_prediction_comparison(
+    alis_data: dict,
+    gcse_data: dict,
+    percentile: str,
+) -> None:
+    """Show a mini table comparing ALIS vs GCSE baseline predictions for sample students."""
+    from alis_adapter import ALIS_TO_APP
+    a_df = alis_data.get(percentile)
+    g_df = gcse_data.get(percentile)
+    if a_df is None or g_df is None:
+        st.info("Data not available for selected percentile.")
+        return
+
+    subj_cols = [c for c in a_df.columns if c not in ("_key", "_name", "baseline")]
+    rows = []
+    for _, arow in a_df.head(20).iterrows():
+        key = arow["_key"]
+        grows = g_df[g_df["_key"] == key]
+        if grows.empty:
+            continue
+        grow = grows.iloc[0]
+        for subj in subj_cols:
+            av = arow.get(subj)
+            gv = grow.get(subj)
+            if av is None or str(av) in ("nan", "None", "") :
+                continue
+            if gv is None or str(gv) in ("nan", "None", ""):
+                continue
+            if str(av) != str(gv):
+                rows.append({
+                    "Student": arow["_name"],
+                    "Subject": subj,
+                    "ALIS test": str(av),
+                    "GCSE baseline": str(gv),
+                })
+
+    if rows:
+        st.dataframe(
+            pd.DataFrame(rows).head(20),
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.caption(f"Showing students where predictions differ at {percentile} percentile.")
+    else:
+        st.info("No differences found for displayed students at this percentile.")
 
 
 def _render_weight_editor(weights: dict, key_prefix: str) -> dict:
@@ -211,12 +280,17 @@ def _init_state() -> None:
         "al_subject_list_df": None,
         "al_warnings": [],
         "al_missing_students": [],
-        # ALIS Adapt data
+        # ALIS Adapt data (ALIS test score based)
         "al_alis_data": None,          # dict[percentile_label: DataFrame]
         "al_alis_percentile": "75th",  # chosen percentile
         "al_alis_mode": "direct",      # "direct" | "ranked"
         "al_alis_proxy_map": {},       # overrides to DEFAULT_PROXY_MAP
         "al_use_alis": False,
+        # GCSE baseline file (same structure, different predictor)
+        "al_gcse_baseline_data": None,
+        "al_gcse_baseline_percentile": "75th",
+        # Blending weight: 0 = pure GCSE baseline, 1 = pure ALIS test
+        "al_alis_blend_weight": 0.5,
         "distribution": {},
         "use_subscores": False,
         "subscore_weights": {},
@@ -673,10 +747,31 @@ else:
             except Exception as e:
                 st.error(f"Error parsing ALIS Adapt file: {e}")
 
-        if st.session_state.get("al_alis_data") is None:
+        gcse_base_file = st.file_uploader(
+            "Upload GCSE Baseline Predictions file (.xls or .xlsx) — optional",
+            type=["xls", "xlsx"],
+            key="al_gcse_baseline_upload",
+        )
+        if gcse_base_file:
+            try:
+                gcse_base_data, gcse_base_warnings = parse_alis_adapt(gcse_base_file)
+                st.session_state["al_gcse_baseline_data"] = gcse_base_data
+                n_gb = len(next(iter(gcse_base_data.values())))
+                st.success(
+                    f"Loaded GCSE Baseline data: **{n_gb} students**, "
+                    f"sheets: {', '.join(gcse_base_data.keys())}"
+                )
+                for w in gcse_base_warnings:
+                    st.warning(w)
+            except Exception as e:
+                st.error(f"Error parsing GCSE Baseline file: {e}")
+
+        if st.session_state.get("al_alis_data") is not None and st.session_state.get("al_gcse_baseline_data") is not None:
+            st.success("Both prediction files loaded — blending available in Configure step.")
+        elif st.session_state.get("al_alis_data") is None and st.session_state.get("al_gcse_baseline_data") is None:
             st.info(
-                "ALIS Adapt not yet uploaded. You can still use the composite GCSE + Yellis "
-                "scoring approach by uploading the files below."
+                "Neither prediction file uploaded yet. You can still use the composite "
+                "GCSE + Yellis scoring approach by uploading the files below."
             )
 
         st.divider()
@@ -879,6 +974,65 @@ else:
                         key="alis_pct_radio",
                     )
                     st.session_state["al_alis_percentile"] = sel_pct
+
+                    # GCSE baseline file blending (shown only when both files loaded)
+                    if st.session_state.get("al_gcse_baseline_data") is not None:
+                        st.divider()
+                        st.markdown("**Blend ALIS test predictions with GCSE baseline predictions**")
+                        st.caption(
+                            "Both prediction files are loaded. The ALIS test captures cognitive "
+                            "aptitude independently of prior schooling; the GCSE baseline reflects "
+                            "academic habits and subject knowledge. Blending both gives a more "
+                            "rounded picture. A 50/50 blend is a reasonable starting point."
+                        )
+
+                        # Same percentile for both by default; allow independent choice
+                        gcse_base_data = st.session_state["al_gcse_baseline_data"]
+                        avail_gcse_pct = list(gcse_base_data.keys())
+                        gcse_pct_options = [p for p in ["50th", "75th", "90th", "97th", "99th"] if p in avail_gcse_pct]
+                        curr_gcse_pct = st.session_state.get("al_gcse_baseline_percentile", sel_pct)
+                        if curr_gcse_pct not in gcse_pct_options:
+                            curr_gcse_pct = gcse_pct_options[0]
+
+                        use_same_pct = st.checkbox(
+                            "Use same percentile for both files",
+                            value=True,
+                            key="alis_same_pct",
+                        )
+                        if use_same_pct:
+                            st.session_state["al_gcse_baseline_percentile"] = sel_pct
+                        else:
+                            gcse_sel_pct = st.radio(
+                                "GCSE baseline percentile",
+                                options=gcse_pct_options,
+                                format_func=lambda p: pct_descriptions.get(p, p),
+                                index=gcse_pct_options.index(curr_gcse_pct),
+                                key="gcse_base_pct_radio",
+                                horizontal=True,
+                            )
+                            st.session_state["al_gcse_baseline_percentile"] = gcse_sel_pct
+
+                        blend_w = st.slider(
+                            "ALIS test weight  ←————→  GCSE baseline weight",
+                            min_value=0.0,
+                            max_value=1.0,
+                            value=float(st.session_state.get("al_alis_blend_weight", 0.5)),
+                            step=0.05,
+                            format="%.2f",
+                            key="alis_blend_slider",
+                        )
+                        st.session_state["al_alis_blend_weight"] = blend_w
+                        c1, c2 = st.columns(2)
+                        c1.metric("ALIS test weight", f"{blend_w:.0%}")
+                        c2.metric("GCSE baseline weight", f"{(1 - blend_w):.0%}")
+
+                        # Quick comparison table
+                        with st.expander("Preview: how predictions differ between files (sample students)"):
+                            _render_prediction_comparison(
+                                st.session_state["al_alis_data"],
+                                st.session_state["al_gcse_baseline_data"],
+                                sel_pct,
+                            )
 
                     st.divider()
                     st.markdown("**Target generation mode**")
