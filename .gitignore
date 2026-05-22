@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+*.pyo
+target_setting_app/target_setting.db
+.env
