@@ -470,6 +470,82 @@ def _assign_grades_by_distribution(
 
 
 # ---------------------------------------------------------------------------
+# GCSE direct-prediction engine (Yellis per-student predictions)
+# ---------------------------------------------------------------------------
+
+class GCSEYellisDirectEngine:
+    """
+    Assigns GCSE targets directly from a Yellis per-student predictions file
+    (CEM predictions export) rather than computing from a distribution curve.
+
+    For each student × subject the lookup returns a predicted grade (1-9)
+    at the chosen percentile.  Dept adjustments are applied on top.
+    Students or subjects with no prediction entry receive "N/A".
+    """
+
+    def __init__(
+        self,
+        lookup,                          # YellisGCSELookup instance
+        subject_list_df: pd.DataFrame,
+        dept_adjustments: dict[str, float] | None = None,
+    ):
+        self.lookup = lookup
+        self.subject_list = subject_list_df.copy()
+        self.dept_adjustments = dept_adjustments or {}
+
+    def generate(self) -> pd.DataFrame:
+        """
+        Returns a DataFrame with columns [surname, forename, form, overall_score,
+        <subject>, ...].  Grade values are integers 1-9 or 'N/A'.
+        """
+        all_subjects: set[str] = set()
+        for subjects in self.subject_list["subjects"]:
+            all_subjects.update(subjects)
+        all_subjects = sorted(all_subjects)
+
+        sl = self.subject_list.copy()
+        sl["_key"] = (
+            sl["surname"].str.strip().str.lower()
+            + "|"
+            + sl["forename"].str.strip().str.lower()
+        )
+
+        targets: dict[str, list] = {s: [] for s in all_subjects}
+        meta_rows = []
+
+        for _, student in sl.iterrows():
+            key = student["_key"]
+            baseline = self.lookup.get_baseline(key)
+
+            meta_rows.append({
+                "surname": student["surname"],
+                "forename": student["forename"],
+                "form": student.get("form", ""),
+                "overall_score": baseline,
+            })
+
+            for subject in all_subjects:
+                takes = subject in student.get("subjects", [])
+                if not takes:
+                    targets[subject].append(pd.NA)
+                    continue
+
+                grade = self.lookup.get_grade(key, subject)
+                if grade is None:
+                    targets[subject].append("N/A")
+                else:
+                    adj = self.dept_adjustments.get(subject, 0.0)
+                    grade = max(1, min(9, int(round(grade + adj))))
+                    targets[subject].append(grade)
+
+        result = pd.DataFrame(meta_rows)
+        for subject in all_subjects:
+            result[subject] = targets[subject]
+
+        return result.reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
 # Summary statistics helpers
 # ---------------------------------------------------------------------------
 

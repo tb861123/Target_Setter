@@ -21,10 +21,15 @@ from data_ingestion import (
 )
 from target_engine import (
     GCSETargetEngine,
+    GCSEYellisDirectEngine,
     ALevelTargetEngine,
     ALevelALISEngine,
     compute_gcse_summary,
     compute_alevel_summary,
+)
+from gcse_predictions_adapter import (
+    parse_yellis_gcse_predictions,
+    YellisGCSELookup,
 )
 from alis_adapter import (
     ALISLookup,
@@ -72,14 +77,31 @@ sm.init_db()
 def _do_gcse_generate() -> None:
     with st.spinner("Generating GCSE targets..."):
         try:
-            engine = GCSETargetEngine(
-                yellis_df=st.session_state["gcse_yellis_df"],
-                subject_list_df=st.session_state["gcse_subject_list_df"],
-                distribution=st.session_state.get("distribution", {}),
-                use_subscores=st.session_state.get("use_subscores", False),
-                subscore_weights=st.session_state.get("subscore_weights", {}),
-                dept_adjustments=st.session_state.get("dept_adjustments", {}),
+            use_pred = (
+                st.session_state.get("gcse_use_predictions", False)
+                and st.session_state.get("gcse_yellis_pred_data") is not None
             )
+            if use_pred:
+                lookup = YellisGCSELookup(
+                    data=st.session_state["gcse_yellis_pred_data"],
+                    percentile=st.session_state.get("gcse_yellis_pred_percentile", "standard"),
+                    source=st.session_state.get("gcse_yellis_pred_source", "score"),
+                    grade_bound=st.session_state.get("gcse_yellis_pred_bound", "lower"),
+                )
+                engine = GCSEYellisDirectEngine(
+                    lookup=lookup,
+                    subject_list_df=st.session_state["gcse_subject_list_df"],
+                    dept_adjustments=st.session_state.get("dept_adjustments", {}),
+                )
+            else:
+                engine = GCSETargetEngine(
+                    yellis_df=st.session_state["gcse_yellis_df"],
+                    subject_list_df=st.session_state["gcse_subject_list_df"],
+                    distribution=st.session_state.get("distribution", {}),
+                    use_subscores=st.session_state.get("use_subscores", False),
+                    subscore_weights=st.session_state.get("subscore_weights", {}),
+                    dept_adjustments=st.session_state.get("dept_adjustments", {}),
+                )
             targets = engine.generate()
             st.session_state["targets_df"] = targets
             st.rerun()
@@ -428,6 +450,19 @@ _FORMAT_HINTS = {
         "| Smith | Alice | 1 | 1 | |\n\n"
         "_Column headers must include Surname and Forename (or Last Name / First Name / PreName)._"
     ),
+    "yellis_gcse_predictions": (
+        "📋 **Expected format — Yellis GCSE Predictions file (.xlsx)**\n\n"
+        "- Export from **CEM Yellis** — the per-student GCSE grade predictions report\n"
+        "- Four sheets (any subset is acceptable):\n"
+        "  - **Standard Score** — 50th-percentile decimal predictions (e.g. 7.1, 8.3)\n"
+        "  - **Standard Grade** — 50th-percentile grade boundaries (e.g. 7, 7/8, 8/9)\n"
+        "  - **Top 25% Score** — 75th-percentile decimal predictions\n"
+        "  - **Top 25% Grade** — 75th-percentile grade boundaries\n"
+        "- Each sheet: header row 2 (row 1 is a title), then one row per student\n"
+        "- Columns include: Student, Surname, Forename, Form, Yellis Score, then one column "
+        "per subject\n\n"
+        "_Upload the file exactly as downloaded from the CEM Yellis platform._"
+    ),
     "alis_adapt": (
         "📋 **Expected format — ALIS Adapt file (.xls or .xlsx)**\n\n"
         "- Multi-sheet file from **CEM ALIS Adapt**\n"
@@ -517,6 +552,13 @@ def _init_state() -> None:
         "match_overrides": {},
         "session_name": "Default",
         "_confirm_regen": False,
+        # Yellis GCSE per-student predictions (CEM predictions file)
+        "gcse_yellis_pred_data": None,   # dict returned by parse_yellis_gcse_predictions
+        "gcse_yellis_pred_percentile": "standard",  # "standard" | "top25"
+        "gcse_yellis_pred_source": "score",         # "score" | "grade"
+        "gcse_yellis_pred_bound": "lower",          # "lower" | "upper" (grade sheets only)
+        "gcse_use_predictions": False,              # True = use direct, False = distribution
+        "al_subject_pct_overrides": {},
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -709,6 +751,39 @@ if mode == "GCSE":
                 except Exception as e:
                     st.error(f"Error parsing subject list: {e}")
 
+        st.divider()
+        st.subheader("Yellis GCSE Predictions (optional)")
+        st.caption(
+            "Upload the CEM per-student GCSE predictions file to use Yellis-derived grade "
+            "predictions directly, rather than ranking students against a distribution curve."
+        )
+        _format_hint("yellis_gcse_predictions")
+        pred_file = st.file_uploader(
+            "Upload Yellis GCSE Predictions Excel (.xlsx)",
+            type=["xlsx", "xls"],
+            key="gcse_yellis_pred_upload",
+        )
+        if pred_file:
+            try:
+                pred_data, pred_warns = parse_yellis_gcse_predictions(pred_file)
+                st.session_state["gcse_yellis_pred_data"] = pred_data
+                st.session_state["gcse_warnings"] = (
+                    st.session_state.get("gcse_warnings", []) + pred_warns
+                )
+                sheets_loaded = list(pred_data.keys())
+                n_students = next(iter(pred_data.values())).shape[0] if pred_data else 0
+                st.success(
+                    f"Loaded predictions for {n_students} students — "
+                    f"sheets: {', '.join(sheets_loaded)}."
+                )
+                if pred_data:
+                    sample_df = next(iter(pred_data.values()))
+                    subj_cols = [c for c in sample_df.columns
+                                 if c not in ("Surname", "Forename", "Yellis_Score")]
+                    st.info(f"Subjects in predictions file: {', '.join(subj_cols)}")
+            except Exception as e:
+                st.error(f"Error parsing predictions file: {e}")
+
         if st.session_state.get("gcse_warnings"):
             render_validation_warnings(st.session_state["gcse_warnings"], [])
 
@@ -753,11 +828,65 @@ if mode == "GCSE":
                 st.session_state["step"] = 0
                 st.rerun()
         else:
+            # --- Predictions mode selector (shown if predictions file is uploaded) ---
+            if st.session_state.get("gcse_yellis_pred_data"):
+                st.subheader("Yellis Predictions Settings")
+                use_pred = st.toggle(
+                    "Use Yellis predictions directly as targets (instead of distribution curve)",
+                    value=st.session_state.get("gcse_use_predictions", False),
+                    key="gcse_use_predictions_toggle",
+                )
+                st.session_state["gcse_use_predictions"] = use_pred
+
+                if use_pred:
+                    pc1, pc2, pc3 = st.columns(3)
+                    with pc1:
+                        pct_choice = st.selectbox(
+                            "Percentile",
+                            ["standard", "top25"],
+                            index=["standard", "top25"].index(
+                                st.session_state.get("gcse_yellis_pred_percentile", "standard")
+                            ),
+                            format_func=lambda x: "Standard (50th %)" if x == "standard" else "Top 25% (75th %)",
+                            key="gcse_yellis_pred_percentile",
+                        )
+                    with pc2:
+                        src_choice = st.selectbox(
+                            "Data type",
+                            ["score", "grade"],
+                            index=["score", "grade"].index(
+                                st.session_state.get("gcse_yellis_pred_source", "score")
+                            ),
+                            format_func=lambda x: "Decimal score (rounded)" if x == "score" else "Grade boundaries",
+                            key="gcse_yellis_pred_source",
+                        )
+                    with pc3:
+                        if src_choice == "grade":
+                            bound_choice = st.selectbox(
+                                "Boundary grade to use",
+                                ["lower", "upper"],
+                                index=["lower", "upper"].index(
+                                    st.session_state.get("gcse_yellis_pred_bound", "lower")
+                                ),
+                                format_func=lambda x: "Lower (conservative)" if x == "lower" else "Upper (aspirational)",
+                                key="gcse_yellis_pred_bound",
+                            )
+                    st.caption(
+                        "When using predictions directly, the distribution curve and sub-score "
+                        "settings are not applied. Dept adjustments still apply."
+                    )
+                st.divider()
+
             tab1, tab2, tab3 = st.tabs(
                 ["Target Distribution", "Sub-score Weighting", "Department Adjustments"]
             )
 
             with tab1:
+                if st.session_state.get("gcse_use_predictions", False):
+                    st.info(
+                        "Distribution curve is not used when Yellis predictions are active. "
+                        "Toggle off predictions above to configure the distribution."
+                    )
                 dist = render_distribution_inputs(
                     "GCSE",
                     existing=st.session_state.get("distribution", {}),
@@ -823,15 +952,25 @@ if mode == "GCSE":
     elif step == 2:
         st.header("Step 3 — Generate Targets")
 
+        _has_pred = st.session_state.get("gcse_yellis_pred_data") is not None
+        _use_pred = st.session_state.get("gcse_use_predictions", False)
+        _needs_yellis = not (_has_pred and _use_pred)
         if (
-            st.session_state.get("gcse_yellis_df") is None
+            (_needs_yellis and st.session_state.get("gcse_yellis_df") is None)
             or st.session_state.get("gcse_subject_list_df") is None
         ):
-            st.warning("Please complete data upload first.")
+            if st.session_state.get("gcse_subject_list_df") is None:
+                st.warning("Please upload a subject list first.")
+            else:
+                st.warning("Please upload a Yellis baseline file (or enable predictions mode).")
             if st.button("← Back to Upload"):
                 st.session_state["step"] = 0
                 st.rerun()
         else:
+            if _use_pred and _has_pred:
+                pct_label = "Standard (50th %)" if st.session_state.get("gcse_yellis_pred_percentile") == "standard" else "Top 25% (75th %)"
+                src_label = "decimal score (rounded)" if st.session_state.get("gcse_yellis_pred_source") == "score" else "grade boundaries"
+                st.info(f"Mode: **Yellis predictions** — {pct_label}, {src_label}.")
             if st.session_state.get("targets_df") is not None:
                 st.info("Targets already generated. Click below to regenerate.")
                 if st.button("Regenerate Targets (resets overrides)", type="secondary", key="gcse_regen"):
