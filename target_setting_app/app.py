@@ -266,7 +266,7 @@ def _do_alevel_generate() -> None:
                     subject_list_df=al_subject_list_df,
                     yellis_df=st.session_state.get("al_yellis_df"),
                     gcse_wide_df=st.session_state.get("al_gcse_wide_df"),
-                    mode=st.session_state.get("al_alis_mode", "direct"),
+                    mode=st.session_state.get("al_alis_mode", "ranked"),
                     distribution=st.session_state.get("distribution", {}),
                     dept_adjustments=st.session_state.get("dept_adjustments", {}),
                     profile_overrides=st.session_state.get("profile_overrides", {}),
@@ -621,7 +621,7 @@ def _init_state() -> None:
         # ALIS Adapt data (ALIS test score based)
         "al_alis_data": None,          # dict[percentile_label: DataFrame]
         "al_alis_percentile": "75th",  # chosen percentile
-        "al_alis_mode": "direct",      # "direct" | "ranked"
+        "al_alis_mode": "ranked",      # "direct" | "ranked"
         "al_alis_proxy_map": {},       # overrides to DEFAULT_PROXY_MAP
         "al_use_alis": False,
         # GCSE baseline file (same structure, different predictor)
@@ -1833,7 +1833,7 @@ else:
                     mode_choice = st.radio(
                         "Mode",
                         ["Direct (use ALIS grade as target)", "Ranked (re-rank by ALIS score, apply school distribution)"],
-                        index=0 if st.session_state.get("al_alis_mode", "direct") == "direct" else 1,
+                        index=0 if st.session_state.get("al_alis_mode", "ranked") == "direct" else 1,
                         key="alis_mode_radio",
                     )
                     st.session_state["al_alis_mode"] = "direct" if "Direct" in mode_choice else "ranked"

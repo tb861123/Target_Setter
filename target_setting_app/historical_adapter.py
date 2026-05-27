@@ -102,18 +102,42 @@ def parse_historical_results(
     except Exception:
         pass
 
-    try:
-        df_raw = pd.read_excel(file, header=0)
-    except Exception:
+    # Try Excel first, auto-detecting preamble rows (templates have title+notes before headers)
+    df_raw = None
+    for skip in (0, 1, 2, 3):
         try:
-            file.seek(0)
-            df_raw = pd.read_csv(file, encoding="utf-8")
+            try:
+                file.seek(0)
+            except Exception:
+                pass
+            candidate = pd.read_excel(file, header=skip)
+            candidate.columns = [str(c).strip() for c in candidate.columns]
+            candidate = candidate.dropna(how="all")
+            if _find_col(candidate, ["Subject", "subject", "SubjectName", "Subject Name", "Qualification"]) is not None:
+                df_raw = candidate
+                break
         except Exception:
-            file.seek(0)
-            df_raw = pd.read_csv(file, encoding="latin-1")
+            continue
 
-    df_raw.columns = [str(c).strip() for c in df_raw.columns]
-    df_raw = df_raw.dropna(how="all")
+    if df_raw is None:
+        # Fall back to CSV
+        for enc in ("utf-8", "latin-1"):
+            try:
+                try:
+                    file.seek(0)
+                except Exception:
+                    pass
+                df_raw = pd.read_csv(file, encoding=enc)
+                df_raw.columns = [str(c).strip() for c in df_raw.columns]
+                df_raw = df_raw.dropna(how="all")
+                if _find_col(df_raw, ["Subject", "subject"]) is not None:
+                    break
+            except Exception:
+                continue
+
+    if df_raw is None or df_raw.empty:
+        warnings.append("Could not read file or find a Subject column in any header row.")
+        return pd.DataFrame(), warnings
 
     grade_col = _find_col(df_raw, ["Grade", "grade"])
     if grade_col:
