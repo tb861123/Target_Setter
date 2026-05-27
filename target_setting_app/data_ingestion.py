@@ -322,7 +322,16 @@ def parse_subject_list(file) -> tuple[pd.DataFrame, str, list[str]]:
 
     fname = getattr(file, "name", "")
     if fname.lower().endswith(".csv"):
-        df = pd.read_csv(file)
+        try:
+            df = pd.read_csv(file, encoding="utf-8")
+        except UnicodeDecodeError:
+            try:
+                file.seek(0)
+            except Exception:
+                pass
+            df = pd.read_csv(file, encoding="latin-1")
+            warnings.append("CSV file is not UTF-8 encoded — read as latin-1 (Windows encoding). "
+                            "Characters with accents may appear correctly.")
     else:
         # Prefer the 'All' sheet (case-insensitive); fall back to first sheet
         sheets = _available_sheets(file)
