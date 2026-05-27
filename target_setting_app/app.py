@@ -187,22 +187,21 @@ def _do_alevel_generate() -> None:
                 and st.session_state.get("al_gcse_wide_df") is not None
             )
 
+            # Build key remaps from confirmed match corrections — available for all code paths
+            match_overrides = st.session_state.get("match_overrides", {})
+            _BAD_SENTINELS = {"__UNMATCHED__", "__IGNORED__", "__DELETED__"}
+            def _extract_remap(source_prefix: str) -> dict[str, str]:
+                prefix = f"{source_prefix}::"
+                return {
+                    k[len(prefix):]: v
+                    for k, v in match_overrides.items()
+                    if k.startswith(prefix) and v not in _BAD_SENTINELS
+                }
+
             if has_alis:
                 proxy_map = dict(DEFAULT_PROXY_MAP)
                 proxy_map.update(st.session_state.get("al_alis_proxy_map", {}))
                 chosen_pct = st.session_state.get("al_alis_percentile", "75th")
-                match_overrides = st.session_state.get("match_overrides", {})
-
-                # Build key remaps from confirmed match corrections
-                # Exclude __UNMATCHED__, __IGNORED__, __DELETED__ sentinels
-                _BAD_SENTINELS = {"__UNMATCHED__", "__IGNORED__", "__DELETED__"}
-                def _extract_remap(source_prefix: str) -> dict[str, str]:
-                    prefix = f"{source_prefix}::"
-                    return {
-                        k[len(prefix):]: v
-                        for k, v in match_overrides.items()
-                        if k.startswith(prefix) and v not in _BAD_SENTINELS
-                    }
 
                 alis_lookup = ALISLookup(
                     data=st.session_state["al_alis_data"],
@@ -948,7 +947,10 @@ if mode == "GCSE":
                 # Reset subject map when a new file is uploaded
                 st.session_state["gcse_hist_subject_map"] = {}
                 for w in hist_warns:
-                    st.info(w) if "Loaded" in w else st.warning(w)
+                    if "Loaded" in w:
+                        st.info(w)
+                    else:
+                        st.warning(w)
             except Exception as e:
                 st.error(f"Error parsing historical results: {e}")
 
@@ -1602,7 +1604,10 @@ else:
                 # Reset subject map when a new file is uploaded
                 st.session_state["al_hist_subject_map"] = {}
                 for w in hist_al_warns:
-                    st.info(w) if "Loaded" in w else st.warning(w)
+                    if "Loaded" in w:
+                        st.info(w)
+                    else:
+                        st.warning(w)
             except Exception as e:
                 st.error(f"Error parsing historical results: {e}")
 
