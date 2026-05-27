@@ -853,27 +853,40 @@ def render_target_explanation(
             format_func=lambda i: display_opts[i],
             key=f"{key_prefix}student",
         )
-    with c2:
-        sel_subj = st.selectbox("Subject", subj_cols, key=f"{key_prefix}subject")
 
-    if sel_idx is None or not sel_subj:
+    if sel_idx is None:
         return
 
     sn, fn = students_sorted[sel_idx]
-    student_key = f"{sn.lower()}|{fn.lower()}"
-    display_name = f"{sn.title()} {fn.title()}"
 
-    # Look up current target for this student/subject
-    mask = (
+    # Only show subjects this student actually takes (non-null target)
+    mask_student = (
         (targets_df["surname"].str.lower() == sn.lower())
         & (targets_df["forename"].str.lower() == fn.lower())
     )
-    rows = targets_df[mask]
-    if rows.empty:
-        st.warning(f"Student {display_name} not found in targets DataFrame.")
+    student_row = targets_df[mask_student]
+    if student_row.empty:
+        return
+    taken_subjs = [c for c in subj_cols if pd.notna(student_row.iloc[0].get(c))]
+    if not taken_subjs:
+        st.info(f"{sn.title()} {fn.title()} has no recorded targets.")
         return
 
-    row = rows.iloc[0]
+    # Reset subject selection when the student changes so the first taken subject is shown
+    student_key_state = f"{key_prefix}last_student"
+    if st.session_state.get(student_key_state) != sel_idx:
+        st.session_state[student_key_state] = sel_idx
+        st.session_state.pop(f"{key_prefix}subject", None)
+
+    with c2:
+        sel_subj = st.selectbox("Subject", taken_subjs, key=f"{key_prefix}subject")
+
+    if not sel_subj:
+        return
+    student_key = f"{sn.lower()}|{fn.lower()}"
+    display_name = f"{sn.title()} {fn.title()}"
+
+    row = student_row.iloc[0]
     target_val = row.get(sel_subj)
     target_display = (
         str(int(round(float(target_val)))) if mode == "GCSE" and pd.notna(target_val)
