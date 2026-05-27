@@ -51,7 +51,7 @@ def render_distribution_inputs(
                 band,
                 min_value=prev,
                 max_value=100.0,
-                value=float(existing.get(band, default)),
+                value=max(prev, float(existing.get(band, default))),
                 step=1.0,
                 key=f"dist_{mode}_{band}",
             )
