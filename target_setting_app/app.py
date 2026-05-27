@@ -18,6 +18,7 @@ from data_ingestion import (
     parse_gcse_grades,
     parse_subject_list,
     parse_alis_adapt,
+    _IGNORED_SUBJECTS_LOWER,
 )
 from target_engine import (
     GCSETargetEngine,
@@ -552,6 +553,11 @@ def _init_state() -> None:
         "match_overrides": {},
         "session_name": "Default",
         "_confirm_regen": False,
+        # Subject exclusions
+        "gcse_subject_list_raw_df": None,
+        "gcse_subject_exclusions": [],
+        "al_subject_list_raw_df": None,
+        "al_subject_exclusions": [],
         # Yellis GCSE per-student predictions (CEM predictions file)
         "gcse_yellis_pred_data": None,   # dict returned by parse_yellis_gcse_predictions
         "gcse_yellis_pred_percentile": "standard",  # "standard" | "top25"
@@ -735,21 +741,45 @@ if mode == "GCSE":
             if subj_file:
                 try:
                     sl_df, fmt, sl_warnings = parse_subject_list(subj_file)
-                    st.session_state["gcse_subject_list_df"] = sl_df
+                    st.session_state["gcse_subject_list_raw_df"] = sl_df
+                    # Reset exclusions to known non-academic subjects found in this file
+                    _all_uploaded = sorted({s for subs in sl_df["subjects"] for s in subs})
+                    _auto_excl = [s for s in _all_uploaded
+                                  if s.lower() in _IGNORED_SUBJECTS_LOWER]
+                    st.session_state["gcse_subject_exclusions"] = _auto_excl
                     st.session_state["gcse_warnings"] = (
                         st.session_state.get("gcse_warnings", []) + sl_warnings
                     )
                     st.success(f"Loaded {len(sl_df)} students. Format: **{fmt}**.")
-                    all_s: set[str] = set()
-                    for subs in sl_df["subjects"]:
-                        all_s.update(subs)
-                    st.info(f"Subjects detected: {', '.join(sorted(all_s))}")
+                    st.info(f"Subjects in file: {', '.join(_all_uploaded)}")
                     with st.expander("Preview"):
                         p = sl_df.head().copy()
                         p["subjects"] = p["subjects"].apply(", ".join)
                         st.dataframe(p)
                 except Exception as e:
                     st.error(f"Error parsing subject list: {e}")
+
+            _gcse_raw_sl = st.session_state.get("gcse_subject_list_raw_df")
+            if _gcse_raw_sl is not None:
+                _all_gcse_subj = sorted({s for subs in _gcse_raw_sl["subjects"] for s in subs})
+                _gcse_excl = st.multiselect(
+                    "Exclude these subjects from target setting:",
+                    options=_all_gcse_subj,
+                    default=st.session_state.get("gcse_subject_exclusions", []),
+                    help="Selected subjects are removed from all students' lists before "
+                         "targets are generated.",
+                )
+                st.session_state["gcse_subject_exclusions"] = _gcse_excl
+                _excl_set = set(_gcse_excl)
+                _filtered = _gcse_raw_sl.copy()
+                if _excl_set:
+                    _filtered["subjects"] = _filtered["subjects"].apply(
+                        lambda subs: [s for s in subs if s not in _excl_set]
+                    )
+                    _filtered = _filtered[
+                        _filtered["subjects"].apply(len) > 0
+                    ].reset_index(drop=True)
+                st.session_state["gcse_subject_list_df"] = _filtered
 
         st.divider()
         st.subheader("Yellis GCSE Predictions (optional)")
@@ -792,20 +822,22 @@ if mode == "GCSE":
             and st.session_state.get("gcse_subject_list_df") is not None
         ):
             st.divider()
-            # Build matching inputs
+            # Build matching inputs (deduplicate master keys to prevent duplicate widgets)
             _gcse_yw = st.session_state["gcse_yellis_df"]
             _gcse_sl = st.session_state["gcse_subject_list_df"]
-            _gcse_master = (
-                _gcse_sl["surname"].str.strip().str.lower()
-                + "|"
-                + _gcse_sl["forename"].str.strip().str.lower()
-            ).tolist()
+            _gcse_master = list(dict.fromkeys(
+                (_gcse_sl["surname"].str.strip().str.lower()
+                 + "|"
+                 + _gcse_sl["forename"].str.strip().str.lower()
+                 ).tolist()
+            ))
             _gcse_src_keys = {
-                "Yellis": (
-                    _gcse_yw["surname"].str.strip().str.lower()
-                    + "|"
-                    + _gcse_yw["forename"].str.strip().str.lower()
-                ).tolist(),
+                "Yellis": list(dict.fromkeys(
+                    (_gcse_yw["surname"].str.strip().str.lower()
+                     + "|"
+                     + _gcse_yw["forename"].str.strip().str.lower()
+                     ).tolist()
+                )),
             }
             render_matching_dashboard(
                 master_keys=_gcse_master,
@@ -1297,21 +1329,44 @@ else:
             if subj_file:
                 try:
                     sl_df, fmt, sl_warnings = parse_subject_list(subj_file)
-                    st.session_state["al_subject_list_df"] = sl_df
+                    st.session_state["al_subject_list_raw_df"] = sl_df
+                    _all_al_uploaded = sorted({s for subs in sl_df["subjects"] for s in subs})
+                    _auto_excl_al = [s for s in _all_al_uploaded
+                                     if s.lower() in _IGNORED_SUBJECTS_LOWER]
+                    st.session_state["al_subject_exclusions"] = _auto_excl_al
                     st.session_state["al_warnings"] = (
                         st.session_state.get("al_warnings", []) + sl_warnings
                     )
-                    all_s: set[str] = set()
-                    for subs in sl_df["subjects"]:
-                        all_s.update(subs)
                     st.success(f"Loaded {len(sl_df)} students. Format: **{fmt}**.")
-                    st.info(f"A Level subjects: {', '.join(sorted(all_s))}")
+                    st.info(f"Subjects in file: {', '.join(_all_al_uploaded)}")
                     with st.expander("Preview"):
                         p = sl_df.head().copy()
                         p["subjects"] = p["subjects"].apply(", ".join)
                         st.dataframe(p)
                 except Exception as e:
                     st.error(f"Error parsing subject list: {e}")
+
+            _al_raw_sl = st.session_state.get("al_subject_list_raw_df")
+            if _al_raw_sl is not None:
+                _all_al_subj = sorted({s for subs in _al_raw_sl["subjects"] for s in subs})
+                _al_excl = st.multiselect(
+                    "Exclude these subjects from target setting:",
+                    options=_all_al_subj,
+                    default=st.session_state.get("al_subject_exclusions", []),
+                    help="Selected subjects are removed from all students' lists before "
+                         "targets are generated.",
+                )
+                st.session_state["al_subject_exclusions"] = _al_excl
+                _al_excl_set = set(_al_excl)
+                _al_filtered = _al_raw_sl.copy()
+                if _al_excl_set:
+                    _al_filtered["subjects"] = _al_filtered["subjects"].apply(
+                        lambda subs: [s for s in subs if s not in _al_excl_set]
+                    )
+                    _al_filtered = _al_filtered[
+                        _al_filtered["subjects"].apply(len) > 0
+                    ].reset_index(drop=True)
+                st.session_state["al_subject_list_df"] = _al_filtered
 
         if st.session_state.get("al_warnings"):
             render_validation_warnings(st.session_state["al_warnings"], [])
@@ -1328,11 +1383,13 @@ else:
 
         if all_ready:
             sl = st.session_state["al_subject_list_df"]
-            al_master_keys = (
-                sl["surname"].str.strip().str.lower()
-                + "|"
-                + sl["forename"].str.strip().str.lower()
-            ).tolist()
+            # Deduplicate to prevent duplicate widget keys in matching dashboard
+            al_master_keys = list(dict.fromkeys(
+                (sl["surname"].str.strip().str.lower()
+                 + "|"
+                 + sl["forename"].str.strip().str.lower()
+                 ).tolist()
+            ))
 
             # Build source key dicts for matching
             al_source_keys: dict[str, list[str]] = {}
@@ -1340,27 +1397,29 @@ else:
             if has_alis:
                 alis_data = st.session_state["al_alis_data"]
                 _adf = next(iter(alis_data.values()))
-                al_source_keys["ALIS Adapt"] = _adf["_key"].tolist()
+                al_source_keys["ALIS Adapt"] = list(dict.fromkeys(_adf["_key"].tolist()))
 
             if st.session_state.get("al_gcse_baseline_data") is not None:
                 _gbdf = next(iter(st.session_state["al_gcse_baseline_data"].values()))
-                al_source_keys["GCSE Baseline"] = _gbdf["_key"].tolist()
+                al_source_keys["GCSE Baseline"] = list(dict.fromkeys(_gbdf["_key"].tolist()))
 
             if st.session_state.get("al_yellis_df") is not None:
                 _ydf = st.session_state["al_yellis_df"]
-                al_source_keys["Yellis"] = (
-                    _ydf["surname"].str.strip().str.lower()
-                    + "|"
-                    + _ydf["firstname"].str.strip().str.lower()
-                ).tolist()
+                al_source_keys["Yellis"] = list(dict.fromkeys(
+                    (_ydf["surname"].str.strip().str.lower()
+                     + "|"
+                     + _ydf["firstname"].str.strip().str.lower()
+                     ).tolist()
+                ))
 
             if st.session_state.get("al_gcse_wide_df") is not None:
                 _gdf = st.session_state["al_gcse_wide_df"]
-                al_source_keys["GCSE Grades"] = (
-                    _gdf["Surname"].str.strip().str.lower()
-                    + "|"
-                    + _gdf["Forename"].str.strip().str.lower()
-                ).tolist()
+                al_source_keys["GCSE Grades"] = list(dict.fromkeys(
+                    (_gdf["Surname"].str.strip().str.lower()
+                     + "|"
+                     + _gdf["Forename"].str.strip().str.lower()
+                     ).tolist()
+                ))
 
             st.divider()
             render_matching_dashboard(

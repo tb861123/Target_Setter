@@ -415,6 +415,10 @@ def render_matching_dashboard(
                 "Or expand **Fix Matching Issues** below to review each one individually."
             )
 
+    # Dedup: if the same master_key appears twice (duplicate student in upload),
+    # only show one row to avoid duplicate widget keys.
+    issues = issues.drop_duplicates(subset="master_key", keep="first")
+
     # Issues summary table
     tbl_rows = []
     for _, row in issues.iterrows():

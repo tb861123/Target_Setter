@@ -402,9 +402,24 @@ def parse_subject_list(file) -> tuple[pd.DataFrame, str, list[str]]:
     df["surname"] = df["surname"].astype(str).str.strip()
     df["forename"] = df["forename"].astype(str).str.strip()
     df = df[(df["surname"].str.lower() != "nan") & df["surname"].notna()]
-    df = df.reset_index(drop=True)
+
+    # Merge duplicate student rows — union of their subject lists
+    df = _merge_duplicate_students(df)
 
     return df, format_detected, warnings
+
+
+def _merge_duplicate_students(df: pd.DataFrame) -> pd.DataFrame:
+    """Collapse rows with the same (surname, forename) by unioning their subject lists."""
+    key = df["surname"].str.lower() + "|" + df["forename"].str.lower()
+    if not key.duplicated().any():
+        return df.reset_index(drop=True)
+    merged = (
+        df.groupby(["surname", "forename"], sort=False)["subjects"]
+        .apply(lambda lists: sorted(set(s for sublist in lists for s in sublist)))
+        .reset_index()
+    )
+    return merged.reset_index(drop=True)
 
 
 def _parse_timetable_format(
