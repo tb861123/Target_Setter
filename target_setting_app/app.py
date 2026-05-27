@@ -318,8 +318,7 @@ def _sheet_picker(file, default_sheet: str, ss_key: str) -> str:
         f"Available: `{'`, `'.join(sheets)}`. Please pick the correct sheet:"
     )
     chosen = st.selectbox("Sheet to use:", sheets, index=sheets.index(current), key=ss_key)
-    st.session_state[ss_key] = chosen
-    return chosen
+    return chosen  # st.selectbox already saves to st.session_state[ss_key]
 
 
 def _col_mapper_expander(
