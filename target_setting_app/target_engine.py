@@ -437,8 +437,39 @@ class ALevelTargetEngine:
 
 
 # ---------------------------------------------------------------------------
-# Shared helper
+# Shared helpers
 # ---------------------------------------------------------------------------
+
+def apply_further_maths_cap(df: pd.DataFrame, mode: str = "GCSE") -> pd.DataFrame:
+    """Cap Further Mathematics target so it never exceeds the Mathematics target."""
+    if "Mathematics" not in df.columns or "Further Mathematics" not in df.columns:
+        return df
+    result = df.copy()
+    if mode == "GCSE":
+        for idx in result.index:
+            m = result.at[idx, "Mathematics"]
+            f = result.at[idx, "Further Mathematics"]
+            try:
+                if pd.notna(m) and pd.notna(f) and isinstance(m, (int, float)) and isinstance(f, (int, float)):
+                    if f > m:
+                        result.at[idx, "Further Mathematics"] = m
+            except (TypeError, ValueError):
+                pass
+    else:  # A Level — higher GRADE_MAP number = better grade
+        for idx in result.index:
+            m = result.at[idx, "Mathematics"]
+            f = result.at[idx, "Further Mathematics"]
+            if m in (None, "N/A", "") or f in (None, "N/A", ""):
+                continue
+            try:
+                m_num = ALEVEL_GRADE_MAP.get(m)
+                f_num = ALEVEL_GRADE_MAP.get(f)
+                if m_num is not None and f_num is not None and f_num > m_num:
+                    result.at[idx, "Further Mathematics"] = m
+            except (TypeError, ValueError):
+                pass
+    return result
+
 
 def _assign_grades_by_distribution(
     n: int,

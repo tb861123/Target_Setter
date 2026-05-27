@@ -27,6 +27,7 @@ from target_engine import (
     ALevelALISEngine,
     compute_gcse_summary,
     compute_alevel_summary,
+    apply_further_maths_cap,
 )
 from gcse_predictions_adapter import (
     parse_yellis_gcse_predictions,
@@ -57,6 +58,7 @@ from ui_components import (
     render_alevel_matrix,
     render_validation_warnings,
     render_matching_dashboard,
+    render_grade_distribution_chart,
 )
 
 # ---------------------------------------------------------------------------
@@ -104,6 +106,8 @@ def _do_gcse_generate() -> None:
                     dept_adjustments=st.session_state.get("dept_adjustments", {}),
                 )
             targets = engine.generate()
+            if st.session_state.get("gcse_cap_further_maths", False):
+                targets = apply_further_maths_cap(targets, mode="GCSE")
             st.session_state["targets_df"] = targets
             st.rerun()
         except Exception as e:
@@ -238,6 +242,21 @@ def _do_alevel_generate() -> None:
                     )
                     targets["overall_score"] = targets["_sl_key"].map(yw_score)
                     targets = targets.drop(columns=["_sl_key"])
+
+            # Add average GCSE column if GCSE grades available
+            _gcse_w = st.session_state.get("al_gcse_wide_df")
+            if _gcse_w is not None:
+                _gw = _gcse_w.copy()
+                _gw["_key"] = _gw["Surname"].str.strip().str.lower() + "|" + _gw["Forename"].str.strip().str.lower()
+                _skip = {"Surname", "Forename", "_key"}
+                _num_cols = [c for c in _gw.columns if c not in _skip]
+                _gw["avg_gcse"] = _gw[_num_cols].apply(pd.to_numeric, errors="coerce").mean(axis=1)
+                targets["_key"] = targets["surname"].str.strip().str.lower() + "|" + targets["forename"].str.strip().str.lower()
+                targets = targets.merge(_gw[["_key", "avg_gcse"]], on="_key", how="left")
+                targets = targets.drop(columns=["_key"])
+
+            if st.session_state.get("al_cap_further_maths", False):
+                targets = apply_further_maths_cap(targets, mode="AL")
 
             st.session_state["targets_df"] = targets
             st.rerun()
@@ -565,6 +584,8 @@ def _init_state() -> None:
         "gcse_yellis_pred_bound": "lower",          # "lower" | "upper" (grade sheets only)
         "gcse_use_predictions": False,              # True = use direct, False = distribution
         "al_subject_pct_overrides": {},
+        "gcse_cap_further_maths": False,
+        "al_cap_further_maths": False,
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -860,6 +881,10 @@ if mode == "GCSE":
                 st.session_state["step"] = 0
                 st.rerun()
         else:
+            st.info(
+                "📋 Review **all three tabs** before proceeding: "
+                "**Target Distribution** · **Sub-score Weighting** · **Department Adjustments**"
+            )
             # --- Predictions mode selector (shown if predictions file is uploaded) ---
             if st.session_state.get("gcse_yellis_pred_data"):
                 st.subheader("Yellis Predictions Settings")
@@ -973,6 +998,13 @@ if mode == "GCSE":
                         key_prefix="gcse_cfg_",
                     )
                     st.session_state["dept_adjustments"] = adj
+                    st.divider()
+                    gcse_cap = st.toggle(
+                        "Cap Further Mathematics target at Maths target (per student)",
+                        value=st.session_state.get("gcse_cap_further_maths", False),
+                        key="gcse_cap_fm_toggle",
+                    )
+                    st.session_state["gcse_cap_further_maths"] = gcse_cap
                 else:
                     st.info("Upload a subject list first.")
 
@@ -1042,6 +1074,8 @@ if mode == "GCSE":
                         df[["surname", "forename", "form"] + s_cols[:6]].head(10),
                         use_container_width=True,
                     )
+                with st.expander("Grade Distribution Chart", expanded=False):
+                    render_grade_distribution_chart(df, "GCSE")
                 _nav_buttons(back=True, forward_label="Next: Review Matrix →", forward_key="gcse_s2")
             else:
                 _nav_buttons(back=True, forward_label="", forward_key="gcse_s2_empty")
@@ -1069,6 +1103,9 @@ if mode == "GCSE":
                 key_prefix="gcse_mx_",
             )
             st.session_state["dept_adjustments"] = dept_adj
+
+            if st.button("↻ Regenerate with these adjustments", key="gcse_mx_regen", help="Re-runs target generation using updated dept adjustments. Manual overrides are preserved."):
+                _do_gcse_generate()
 
             _, updated_overrides = render_gcse_matrix(
                 df,
@@ -1215,11 +1252,11 @@ else:
         col1, col2, col3 = st.columns(3)
 
         with col1:
-            st.subheader("Yellis Baseline (Year 12)")
-            st.caption("Required for GCSE-composite mode; also provides baseline scores for ALIS mode.")
+            st.subheader("ALIS Baseline (Year 12)")
+            st.caption("The CEM ALIS cognitive ability test — used for composite scoring with GCSE grades.")
             _format_hint("yellis_alevel")
             st.download_button(
-                "📥 Download template",
+                "📥 Download ALIS template",
                 data=template_yellis_alevel(),
                 file_name="Template_Yellis_ALevel.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1457,6 +1494,8 @@ else:
             if has_composite:
                 tab_labels += ["Score Weighting", "Fallback Ratio", "Subject Profiles"]
 
+            tab_summary = " · ".join(f"**{t}**" for t in tab_labels)
+            st.info(f"📋 Review all {len(tab_labels)} tabs before proceeding: {tab_summary}")
             tabs = st.tabs(tab_labels)
             tab_idx = {label: i for i, label in enumerate(tab_labels)}
 
@@ -1539,19 +1578,26 @@ else:
                             )
                             st.session_state["al_gcse_baseline_percentile"] = gcse_sel_pct
 
-                        blend_w = st.slider(
-                            "ALIS test weight  ←————→  GCSE baseline weight",
-                            min_value=0.0,
-                            max_value=1.0,
-                            value=float(st.session_state.get("al_alis_blend_weight", 0.5)),
-                            step=0.05,
-                            format="%.2f",
-                            key="alis_blend_slider",
+                        _stored_pct = int(round(st.session_state.get("al_alis_blend_weight", 0.5) * 100))
+                        blend_pct = st.slider(
+                            "Prediction blend: ALIS test score contribution",
+                            min_value=0,
+                            max_value=100,
+                            value=_stored_pct,
+                            step=5,
+                            format="%d%%",
+                            help=(
+                                "Sets how much each prediction source contributes to the final target. "
+                                "100% = use only ALIS test predictions. "
+                                "0% = use only GCSE-derived predictions. "
+                                "50% = equal blend of both."
+                            ),
                         )
+                        blend_w = blend_pct / 100.0
                         st.session_state["al_alis_blend_weight"] = blend_w
                         c1, c2 = st.columns(2)
-                        c1.metric("ALIS test weight", f"{blend_w:.0%}")
-                        c2.metric("GCSE baseline weight", f"{(1 - blend_w):.0%}")
+                        c1.metric("ALIS test score", f"{blend_w:.0%}")
+                        c2.metric("GCSE-derived", f"{(1 - blend_w):.0%}")
 
                         # Quick comparison table
                         with st.expander("Preview: how predictions differ between files (sample students)"):
@@ -1756,6 +1802,13 @@ else:
                         key_prefix="al_cfg_",
                     )
                     st.session_state["dept_adjustments"] = adj
+                    st.divider()
+                    al_cap = st.toggle(
+                        "Cap Further Mathematics target at Maths target (per student)",
+                        value=st.session_state.get("al_cap_further_maths", False),
+                        key="al_cap_fm_toggle",
+                    )
+                    st.session_state["al_cap_further_maths"] = al_cap
                 else:
                     st.info("Upload a subject list first.")
 
@@ -1818,6 +1871,8 @@ else:
                         df[["surname", "forename"] + s_cols[:6]].head(10),
                         use_container_width=True,
                     )
+                with st.expander("Grade Distribution Chart", expanded=False):
+                    render_grade_distribution_chart(df, "AL")
                 _nav_buttons(back=True, forward_label="Next: Review Matrix →", forward_key="al_s2")
             else:
                 _nav_buttons(back=True, forward_label="", forward_key="al_s2_empty")
@@ -1845,6 +1900,9 @@ else:
                 key_prefix="al_mx_",
             )
             st.session_state["dept_adjustments"] = dept_adj
+
+            if st.button("↻ Regenerate with these adjustments", key="al_mx_regen", help="Re-runs target generation using updated dept adjustments. Manual overrides are preserved."):
+                _do_alevel_generate()
 
             _, updated_overrides = render_alevel_matrix(
                 df,

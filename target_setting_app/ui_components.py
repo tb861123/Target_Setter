@@ -223,7 +223,7 @@ def render_alevel_matrix(
 
     subject_cols = [
         c for c in targets_df.columns
-        if c not in ("surname", "forename", "year_group", "overall_score")
+        if c not in ("surname", "forename", "year_group", "overall_score", "avg_gcse")
     ]
     subject_cols = sorted(subject_cols)
 
@@ -263,8 +263,11 @@ def render_alevel_matrix(
         r = {
             "Surname": row["surname"],
             "Forename": row["forename"],
-            "Yellis": f"{row['overall_score']:.1f}" if pd.notna(row.get("overall_score")) else "",
+            "ALIS score": f"{row['overall_score']:.1f}" if pd.notna(row.get("overall_score")) else "",
         }
+        if "avg_gcse" in row.index:
+            avg = row.get("avg_gcse")
+            r["Avg GCSE"] = f"{avg:.1f}" if pd.notna(avg) else ""
         for subj in subject_cols:
             val = row.get(subj)
             r[subj] = val if pd.notna(val) and val not in ("", None) else ""
@@ -525,3 +528,40 @@ def render_matching_dashboard(
             ):
                 st.session_state[ss_key] = {}
                 st.rerun()
+
+
+def render_grade_distribution_chart(targets_df: pd.DataFrame, mode: str) -> None:
+    """Grade distribution pivot table per subject."""
+    if mode == "GCSE":
+        grade_order = [str(g) for g in range(9, 0, -1)]
+        meta_cols = {"surname", "forename", "form", "overall_score", "avg_gcse"}
+    else:
+        grade_order = ["A*", "A", "B", "C", "D", "E"]
+        meta_cols = {"surname", "forename", "year_group", "overall_score", "avg_gcse"}
+
+    subj_cols = sorted([c for c in targets_df.columns if c not in meta_cols])
+    if not subj_cols:
+        return
+
+    rows = []
+    for subj in subj_cols:
+        col = targets_df[subj].dropna()
+        col = col[col.astype(str) != "N/A"]
+        row = {"Subject": subj}
+        total = len(col)
+        for grade in grade_order:
+            n = (col.astype(str) == str(grade)).sum()
+            row[grade] = n
+        row["n"] = total
+        rows.append(row)
+
+    if not rows:
+        return
+
+    chart_df = pd.DataFrame(rows).set_index("Subject")
+    cols_present = [g for g in grade_order if g in chart_df.columns]
+    chart_df = chart_df[cols_present + ["n"]]
+
+    st.markdown("#### Grade Distribution by Subject")
+    st.caption("Count of students at each grade. 'n' = students with a prediction for that subject.")
+    st.dataframe(chart_df, use_container_width=True)
