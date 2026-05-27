@@ -1,8 +1,12 @@
 """
-Student name matching across multiple data sources.
+Student and subject name matching across multiple data sources.
 
-Handles: exact matches, normalised matches (hyphens/apostrophes/accents stripped),
-surname-only tiebreaking, forename abbreviation (Tom ↔ Thomas), and fuzzy scoring.
+Student matching handles: exact matches, normalised matches (hyphens/apostrophes/
+accents stripped), surname-only tiebreaking, forename abbreviation (Tom ↔ Thomas),
+and fuzzy scoring.
+
+Subject matching handles: exact, case-insensitive, common abbreviations (Maths →
+Mathematics, Eng Lit → English Literature, etc.), and fuzzy sequence scoring.
 """
 
 from __future__ import annotations
@@ -325,3 +329,193 @@ def apply_overrides_to_key(
         # auto-use suggestion only if it's the only candidate — otherwise need manual confirm
         return row.iloc[0].get(col_suggestion) or key
     return key
+
+
+# ---------------------------------------------------------------------------
+# Subject name matching
+# ---------------------------------------------------------------------------
+
+# Lowercase → canonical subject name.  Only the most common abbreviations;
+# the canonical names mirror the subject_profiles.py constants exactly.
+_SUBJECT_ALIASES: dict[str, str] = {
+    "maths": "Mathematics",
+    "math": "Mathematics",
+    "further maths": "Further Mathematics",
+    "further math": "Further Mathematics",
+    "f/maths": "Further Mathematics",
+    "further maths (as)": "Further Mathematics",
+    "eng lang": "English Language",
+    "english lang": "English Language",
+    "eng lit": "English Literature",
+    "english lit": "English Literature",
+    "english lang & lit": "English Language",
+    "bio": "Biology",
+    "chem": "Chemistry",
+    "phys": "Physics",
+    "hist": "History",
+    "geo": "Geography",
+    "geog": "Geography",
+    "econ": "Economics",
+    "computer science": "Computing",
+    "i.t.": "Computing",
+    "it": "Computing",
+    "information technology": "Computing",
+    "pe": "Physical Education",
+    "p.e.": "Physical Education",
+    "sport": "Physical Education",
+    "sports": "Physical Education",
+    "d&t": "Design Technology",
+    "design & technology": "Design Technology",
+    "design and technology": "Design Technology",
+    "dt": "Design Technology",
+    "re": "Religion Philosophy And Ethics",
+    "rs": "Religion Philosophy And Ethics",
+    "religious studies": "Religion Philosophy And Ethics",
+    "religion philosophy and ethics": "Religion Philosophy And Ethics",
+    "religion, philosophy and ethics": "Religion Philosophy And Ethics",
+    "rpe": "Religion Philosophy And Ethics",
+    "philosophy and ethics": "Religion Philosophy And Ethics",
+    "ethics": "Religion Philosophy And Ethics",
+    "classical civ": "Classical Civilisation",
+    "classics": "Classical Civilisation",
+    "psych": "Psychology",
+    "business": "Business Studies",
+    "business studies": "Business Studies",
+    "business & management": "Business Studies",
+    "art & design": "Art",
+    "art and design": "Art",
+    "fine art": "Art",
+    "media": "Media Studies",
+    "film": "Film Studies",
+    "politics": "Politics",
+    "gov & politics": "Politics",
+    "government & politics": "Politics",
+    "government and politics": "Politics",
+    "phil": "Philosophy",
+    "sociology": "Sociology",
+    "soc": "Sociology",
+    "spanish": "Spanish",
+    "french": "French",
+    "german": "German",
+    "latin": "Latin",
+    "drama": "Drama",
+    "music": "Music",
+}
+
+
+def normalise_subject(name: str) -> str:
+    """Strip, collapse whitespace, and resolve common abbreviations."""
+    s = name.strip()
+    lower = re.sub(r"\s+", " ", s.lower().rstrip("."))
+    return _SUBJECT_ALIASES.get(lower, s)
+
+
+def match_subjects(
+    source_subjects: list[str],
+    canonical_subjects: list[str],
+    threshold: float = 0.82,
+) -> dict[str, tuple[str, float, str]]:
+    """
+    Match each source subject name to the closest canonical name.
+
+    Returns
+    -------
+    {source_name: (canonical_name, score, match_type)}
+    match_type: "exact" | "alias" | "fuzzy" | "possible" | "unmatched"
+    """
+    if not canonical_subjects:
+        return {s: (s, 0.0, "unmatched") for s in source_subjects}
+
+    canonical_lower = {c.lower().strip(): c for c in canonical_subjects}
+    result: dict[str, tuple[str, float, str]] = {}
+
+    for src in source_subjects:
+        src_clean = src.strip()
+
+        # 1. Exact
+        if src_clean in canonical_subjects:
+            result[src_clean] = (src_clean, 1.0, "exact")
+            continue
+
+        # 2. Case-insensitive exact
+        src_lower = src_clean.lower().strip()
+        if src_lower in canonical_lower:
+            result[src_clean] = (canonical_lower[src_lower], 0.99, "exact")
+            continue
+
+        # 3. Alias
+        aliased = normalise_subject(src_clean)
+        if aliased in canonical_subjects:
+            result[src_clean] = (aliased, 0.95, "alias")
+            continue
+
+        # 4. Fuzzy sequence similarity
+        scored = [
+            (c, difflib.SequenceMatcher(None, src_lower, c.lower()).ratio())
+            for c in canonical_subjects
+        ]
+        best_c, best_s = max(scored, key=lambda x: x[1])
+        if best_s >= threshold:
+            result[src_clean] = (best_c, round(best_s, 3), "fuzzy")
+        elif best_s >= 0.55:
+            result[src_clean] = (best_c, round(best_s, 3), "possible")
+        else:
+            result[src_clean] = (best_c, round(best_s, 3), "unmatched")
+
+    return result
+
+
+def build_subject_map(
+    subject_matches: dict[str, tuple[str, float, str]],
+    manual_overrides: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """
+    Build a final {source_name: canonical_name} map from match results and
+    any user-confirmed overrides.  Auto-accepts exact and alias matches.
+    """
+    overrides = manual_overrides or {}
+    mapping: dict[str, str] = {}
+    for src, (canon, _score, mtype) in subject_matches.items():
+        if src in overrides:
+            mapping[src] = overrides[src]
+        elif mtype in ("exact", "alias"):
+            mapping[src] = canon
+        # fuzzy / possible / unmatched — only accepted if user confirmed via override
+    return mapping
+
+
+def resolve_student_keys(
+    df: pd.DataFrame,
+    surname_col: str,
+    forename_col: str,
+    manual_remap: dict[str, str] | None = None,
+) -> pd.Series:
+    """
+    Return a Series of resolved canonical keys for each row.
+
+    manual_remap maps canonical_key → source_key (output of _extract_remap).
+    This function inverts it and also applies normalised key matching as a
+    fallback, so apostrophes, hyphens, and accents are handled automatically.
+    """
+    remap = manual_remap or {}
+    # Invert: source_key → canonical_key
+    inv_remap = {v: k for k, v in remap.items()}
+    # Normalised version of the same inversion
+    norm_inv = {normalise_key(v): k for k, v in remap.items()}
+
+    raw = (
+        df[surname_col].astype(str).str.strip().str.lower()
+        + "|"
+        + df[forename_col].astype(str).str.strip().str.lower()
+    )
+
+    def _resolve(key: str) -> str:
+        if key in inv_remap:
+            return inv_remap[key]
+        nk = normalise_key(key)
+        if nk in norm_inv:
+            return norm_inv[nk]
+        # Normalised self — e.g. "o'brien|alice" → "obrien|alice"
+        return nk
+
+    return raw.map(_resolve)

@@ -60,10 +60,12 @@ from ui_components import (
     render_alevel_matrix,
     render_validation_warnings,
     render_matching_dashboard,
+    render_subject_mapping_dashboard,
     render_grade_distribution_chart,
     render_historical_comparison,
     render_target_explanation,
 )
+from matching import resolve_student_keys, build_subject_map, match_subjects
 from historical_adapter import parse_historical_results
 
 # ---------------------------------------------------------------------------
@@ -92,6 +94,42 @@ def _filter_deleted(df: pd.DataFrame, deleted_keys: set) -> pd.DataFrame:
         + df["forename"].astype(str).str.strip().str.lower()
     )
     return df[~key_col.isin(deleted_keys)].reset_index(drop=True)
+
+
+def _apply_subject_map_to_df(df: pd.DataFrame, subject_map: dict[str, str]) -> pd.DataFrame:
+    """Rename Subject column values using a confirmed mapping dict."""
+    if not subject_map or df.empty or "Subject" not in df.columns:
+        return df
+    df = df.copy()
+    df["Subject"] = df["Subject"].map(lambda s: subject_map.get(s, s))
+    return df
+
+
+def _get_mapped_historical(mode: str) -> pd.DataFrame | None:
+    """Return the historical DataFrame with subject names remapped to canonical."""
+    key = "gcse_historical_df" if mode == "GCSE" else "al_historical_df"
+    map_key = "gcse_hist_subject_map" if mode == "GCSE" else "al_hist_subject_map"
+    hist_df = st.session_state.get(key)
+    if hist_df is None or hist_df.empty:
+        return None
+    subj_map = st.session_state.get(map_key, {})
+    return _apply_subject_map_to_df(hist_df, subj_map)
+
+
+def _apply_subject_map_to_columns(df: pd.DataFrame, subject_map: dict[str, str]) -> pd.DataFrame:
+    """Rename columns of a wide-format DataFrame using a confirmed mapping dict."""
+    if not subject_map:
+        return df
+    rename = {old: new for old, new in subject_map.items() if old in df.columns}
+    return df.rename(columns=rename) if rename else df
+
+
+def _canonical_subjects_from_sl(subject_list_df: pd.DataFrame) -> list[str]:
+    """Extract sorted canonical subject names from a parsed subject-list DataFrame."""
+    subjects: set[str] = set()
+    for row_subjects in subject_list_df["subjects"]:
+        subjects.update(row_subjects)
+    return sorted(subjects)
 
 
 def _do_gcse_generate() -> None:
@@ -252,45 +290,42 @@ def _do_alevel_generate() -> None:
 
             targets = engine.generate()
 
-            # Attach ALIS baseline scores if available from Yellis df
+            # Canonical keys for targets (from subject list — already normalised)
+            targets["_canon_key"] = resolve_student_keys(
+                targets, "surname", "forename",
+                manual_remap=None,  # targets already have canonical keys
+            )
+
+            # Attach ALIS baseline scores from Yellis df using resolved keys
             if has_alis and st.session_state.get("al_yellis_df") is not None:
                 yellis_df = st.session_state["al_yellis_df"]
-                yw_key = (
-                    yellis_df["surname"].str.strip().str.lower()
-                    + "|"
-                    + yellis_df["firstname"].str.strip().str.lower()
+                yw_resolved = resolve_student_keys(
+                    yellis_df, "surname", "firstname",
+                    manual_remap=_extract_remap("Yellis"),
                 )
-                yw_score = dict(zip(yw_key, yellis_df["overall_score"]))
+                yw_score = dict(zip(yw_resolved, yellis_df["overall_score"]))
                 if "overall_score" not in targets.columns or targets["overall_score"].isna().all():
-                    targets["_sl_key"] = (
-                        targets["surname"].str.strip().str.lower()
-                        + "|"
-                        + targets["forename"].str.strip().str.lower()
-                    )
-                    targets["overall_score"] = targets["_sl_key"].map(yw_score)
-                    targets = targets.drop(columns=["_sl_key"])
+                    targets["overall_score"] = targets["_canon_key"].map(yw_score)
 
-            # Add average GCSE column if GCSE grades available
+            # Add average GCSE column using resolved keys (handles name mismatches)
             _gcse_w = st.session_state.get("al_gcse_wide_df")
             if _gcse_w is not None:
                 _gw = _gcse_w.copy()
-                _gw["_key"] = (
-                    _gw["Surname"].astype(str).str.strip().str.lower()
-                    + "|"
-                    + _gw["Forename"].astype(str).str.strip().str.lower()
+                # Apply subject name mapping to GCSE grades columns
+                _gcse_subj_map = st.session_state.get("gcse_grades_subject_map", {})
+                _gw = _apply_subject_map_to_columns(_gw, _gcse_subj_map)
+                # Resolve student keys using match overrides + normalised matching
+                _gw["_canon_key"] = resolve_student_keys(
+                    _gw, "Surname", "Forename",
+                    manual_remap=_extract_remap("GCSE Grades"),
                 )
-                _skip = {"Surname", "Forename", "_key"}
+                _skip = {"Surname", "Forename", "_canon_key"}
                 _num_cols = [c for c in _gw.columns if c not in _skip]
                 _gw["avg_gcse"] = _gw[_num_cols].apply(pd.to_numeric, errors="coerce").mean(axis=1)
-                # Drop any pre-existing _key column to prevent _key_x/_key_y collision
-                targets = targets.drop(columns=["_key"], errors="ignore")
-                targets["_key"] = (
-                    targets["surname"].astype(str).str.strip().str.lower()
-                    + "|"
-                    + targets["forename"].astype(str).str.strip().str.lower()
-                )
-                targets = targets.merge(_gw[["_key", "avg_gcse"]], on="_key", how="left")
-                targets = targets.drop(columns=["_key"])
+                targets = targets.drop(columns=["avg_gcse"], errors="ignore")
+                targets = targets.merge(_gw[["_canon_key", "avg_gcse"]], on="_canon_key", how="left")
+
+            targets = targets.drop(columns=["_canon_key"], errors="ignore")
 
             if st.session_state.get("al_cap_further_maths", False):
                 targets = apply_further_maths_cap(targets, mode="AL")
@@ -629,6 +664,13 @@ def _init_state() -> None:
         # Deleted students (from matching dashboard)
         "gcse_deleted_students": set(),
         "al_deleted_students": set(),
+        # Canonical subject lists (derived from subject list after exclusions)
+        "gcse_canonical_subjects": [],
+        "al_canonical_subjects": [],
+        # Subject name maps: {source_name: canonical_name}
+        "gcse_grades_subject_map": {},   # GCSE grades file → GCSE subject list
+        "gcse_hist_subject_map": {},     # Historical GCSE file → GCSE subject list
+        "al_hist_subject_map": {},       # Historical A Level file → A Level subject list
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -844,6 +886,8 @@ if mode == "GCSE":
                         _filtered["subjects"].apply(len) > 0
                     ].reset_index(drop=True)
                 st.session_state["gcse_subject_list_df"] = _filtered
+                # Store canonical subjects for cross-file matching
+                st.session_state["gcse_canonical_subjects"] = _canonical_subjects_from_sl(_filtered)
 
         st.divider()
         st.subheader("Yellis GCSE Predictions (optional)")
@@ -901,6 +945,8 @@ if mode == "GCSE":
             try:
                 hist_df, hist_warns = parse_historical_results(hist_gcse_file, mode="GCSE")
                 st.session_state["gcse_historical_df"] = hist_df if not hist_df.empty else None
+                # Reset subject map when a new file is uploaded
+                st.session_state["gcse_hist_subject_map"] = {}
                 for w in hist_warns:
                     st.info(w) if "Loaded" in w else st.warning(w)
             except Exception as e:
@@ -914,6 +960,16 @@ if mode == "GCSE":
                 f"Historical data loaded: {n_subj} subjects, "
                 f"year(s): {', '.join(str(y) for y in _years)}."
             )
+            _gcse_canon = st.session_state.get("gcse_canonical_subjects", [])
+            if _gcse_canon:
+                _hist_subjects = sorted(_h["Subject"].unique().tolist())
+                _gcse_hist_map = render_subject_mapping_dashboard(
+                    source_subjects=_hist_subjects,
+                    canonical_subjects=_gcse_canon,
+                    ss_key="gcse_hist_subject_map",
+                    key_prefix="gcse_hist_smd_",
+                )
+                st.session_state["gcse_hist_subject_map"] = _gcse_hist_map
 
         if st.session_state.get("gcse_warnings"):
             render_validation_warnings(st.session_state["gcse_warnings"], [])
@@ -1157,13 +1213,10 @@ if mode == "GCSE":
                     )
                 with st.expander("Grade Distribution Chart", expanded=False):
                     render_grade_distribution_chart(df, "GCSE")
-                if st.session_state.get("gcse_historical_df") is not None:
+                _mapped_gcse_hist = _get_mapped_historical("GCSE")
+                if _mapped_gcse_hist is not None:
                     with st.expander("Historical Comparison", expanded=False):
-                        render_historical_comparison(
-                            df,
-                            st.session_state["gcse_historical_df"],
-                            mode="GCSE",
-                        )
+                        render_historical_comparison(df, _mapped_gcse_hist, mode="GCSE")
                 _nav_buttons(back=True, forward_label="Next: Review Matrix →", forward_key="gcse_s2")
             else:
                 _nav_buttons(back=True, forward_label="", forward_key="gcse_s2_empty")
@@ -1202,13 +1255,10 @@ if mode == "GCSE":
             )
             st.session_state["overrides"] = updated_overrides
 
-            if st.session_state.get("gcse_historical_df") is not None:
+            _mapped_gcse_hist = _get_mapped_historical("GCSE")
+            if _mapped_gcse_hist is not None:
                 with st.expander("Historical Comparison", expanded=False):
-                    render_historical_comparison(
-                        df,
-                        st.session_state["gcse_historical_df"],
-                        mode="GCSE",
-                    )
+                    render_historical_comparison(df, _mapped_gcse_hist, mode="GCSE")
 
             with st.expander("Explain a Target", expanded=False):
                 st.caption(
@@ -1420,6 +1470,8 @@ else:
                         gcse_file, sheet_name=sheet, col_map=col_map
                     )
                     st.session_state["al_gcse_wide_df"] = gcse_df
+                    # Reset subject map when a new file is uploaded
+                    st.session_state["gcse_grades_subject_map"] = {}
                     st.session_state["al_warnings"] = (
                         st.session_state.get("al_warnings", []) + gcse_warnings
                     )
@@ -1430,6 +1482,21 @@ else:
                         st.dataframe(gcse_df.head())
                 except Exception as e:
                     st.error(f"Error parsing GCSE grades file: {e}")
+
+            # Subject name mapping for GCSE grades → A Level canonical subjects
+            _gcse_wide = st.session_state.get("al_gcse_wide_df")
+            _al_canon = st.session_state.get("al_canonical_subjects", [])
+            if _gcse_wide is not None and _al_canon:
+                _gcse_grade_subjects = [
+                    c for c in _gcse_wide.columns if c not in ("Surname", "Forename")
+                ]
+                _gcse_grades_map = render_subject_mapping_dashboard(
+                    source_subjects=_gcse_grade_subjects,
+                    canonical_subjects=_al_canon,
+                    ss_key="gcse_grades_subject_map",
+                    key_prefix="gcse_grades_smd_",
+                )
+                st.session_state["gcse_grades_subject_map"] = _gcse_grades_map
 
         with col3:
             st.subheader("Student Subject List")
@@ -1506,6 +1573,8 @@ else:
                         _al_filtered["subjects"].apply(len) > 0
                     ].reset_index(drop=True)
                 st.session_state["al_subject_list_df"] = _al_filtered
+                # Store canonical subjects for cross-file matching
+                st.session_state["al_canonical_subjects"] = _canonical_subjects_from_sl(_al_filtered)
 
         st.divider()
         st.subheader("Historical A Level Results (optional)")
@@ -1530,6 +1599,8 @@ else:
             try:
                 hist_al_df, hist_al_warns = parse_historical_results(hist_al_file, mode="AL")
                 st.session_state["al_historical_df"] = hist_al_df if not hist_al_df.empty else None
+                # Reset subject map when a new file is uploaded
+                st.session_state["al_hist_subject_map"] = {}
                 for w in hist_al_warns:
                     st.info(w) if "Loaded" in w else st.warning(w)
             except Exception as e:
@@ -1543,6 +1614,16 @@ else:
                 f"Historical data loaded: {n_subj_al} subjects, "
                 f"year(s): {', '.join(str(y) for y in _years_al)}."
             )
+            _al_canon = st.session_state.get("al_canonical_subjects", [])
+            if _al_canon:
+                _hist_al_subjects = sorted(_h_al["Subject"].unique().tolist())
+                _al_hist_map = render_subject_mapping_dashboard(
+                    source_subjects=_hist_al_subjects,
+                    canonical_subjects=_al_canon,
+                    ss_key="al_hist_subject_map",
+                    key_prefix="al_hist_smd_",
+                )
+                st.session_state["al_hist_subject_map"] = _al_hist_map
 
         if st.session_state.get("al_warnings"):
             render_validation_warnings(st.session_state["al_warnings"], [])
@@ -2027,13 +2108,10 @@ else:
                             f"Return to Upload to fix matching: {', '.join(_missing_names[:5])}"
                             + (f" … and {len(_missing_names) - 5} more" if len(_missing_names) > 5 else "")
                         )
-                if st.session_state.get("al_historical_df") is not None:
+                _mapped_al_hist = _get_mapped_historical("AL")
+                if _mapped_al_hist is not None:
                     with st.expander("Historical Comparison", expanded=False):
-                        render_historical_comparison(
-                            df,
-                            st.session_state["al_historical_df"],
-                            mode="AL",
-                        )
+                        render_historical_comparison(df, _mapped_al_hist, mode="AL")
                 _nav_buttons(back=True, forward_label="Next: Review Matrix →", forward_key="al_s2")
             else:
                 _nav_buttons(back=True, forward_label="", forward_key="al_s2_empty")
@@ -2072,13 +2150,10 @@ else:
             )
             st.session_state["overrides"] = updated_overrides
 
-            if st.session_state.get("al_historical_df") is not None:
+            _mapped_al_hist = _get_mapped_historical("AL")
+            if _mapped_al_hist is not None:
                 with st.expander("Historical Comparison", expanded=False):
-                    render_historical_comparison(
-                        df,
-                        st.session_state["al_historical_df"],
-                        mode="AL",
-                    )
+                    render_historical_comparison(df, _mapped_al_hist, mode="AL")
 
             with st.expander("Explain a Target", expanded=False):
                 st.caption(

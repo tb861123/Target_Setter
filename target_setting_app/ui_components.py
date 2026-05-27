@@ -1106,3 +1106,128 @@ def _explain_alevel_target(sn, fn, student_key, subject, target_val, ss, targets
             st.metric("Department adjustment", f"{dept_adj:+.1f} grades")
     else:
         st.caption("No department adjustment for this subject.")
+
+
+# ---------------------------------------------------------------------------
+# Subject name mapping dashboard
+# ---------------------------------------------------------------------------
+
+def render_subject_mapping_dashboard(
+    source_subjects: list[str],
+    canonical_subjects: list[str],
+    ss_key: str,
+    key_prefix: str = "smd_",
+) -> dict[str, str]:
+    """
+    Compare source subject names against canonical names from the subject list.
+    Auto-accepts exact and alias matches; presents fuzzy/unmatched for user review.
+
+    Stores confirmed overrides in st.session_state[ss_key] and returns the full
+    effective mapping {source_name: canonical_name} for every source subject.
+    """
+    from matching import match_subjects, build_subject_map
+
+    if not source_subjects or not canonical_subjects:
+        return {}
+
+    saved_overrides: dict[str, str] = st.session_state.get(ss_key, {})
+    all_matches = match_subjects(source_subjects, canonical_subjects)
+
+    # Build effective map: auto-accept exact/alias, apply saved overrides for rest
+    effective_map = build_subject_map(all_matches, saved_overrides)
+
+    # Auto-aliases that haven't been manually overridden: persist them
+    for src, (canon, _s, mtype) in all_matches.items():
+        if mtype in ("exact", "alias") and src not in saved_overrides:
+            saved_overrides[src] = canon
+
+    # Identify subjects needing review (not yet accepted)
+    needs_review = {
+        src: (canon, score, mtype)
+        for src, (canon, score, mtype) in all_matches.items()
+        if mtype not in ("exact", "alias") and src not in saved_overrides
+    }
+
+    # Summary of auto-resolved
+    auto_count = sum(
+        1 for src in source_subjects
+        if all_matches.get(src, ("", 0, ""))[2] in ("exact", "alias")
+        or src in saved_overrides
+    )
+
+    if not needs_review:
+        if any(v != k for k, v in effective_map.items()):
+            st.success(
+                f"All {len(source_subjects)} subjects matched to canonical names "
+                f"({auto_count} auto-resolved)."
+            )
+        st.session_state[ss_key] = saved_overrides
+        return effective_map
+
+    with st.expander(
+        f"⚠️ Subject name review — {len(needs_review)} unresolved "
+        f"({auto_count} auto-matched)",
+        expanded=True,
+    ):
+        st.caption(
+            "These subject names from the uploaded file don't exactly match the "
+            "subject list.  Select the correct canonical name for each, or leave "
+            "as-is to exclude from matching."
+        )
+
+        accept_all_clicked = st.button(
+            "Accept all suggestions", key=f"{key_prefix}accept_all"
+        )
+
+        header_cols = st.columns([3, 1, 3])
+        header_cols[0].markdown("**Uploaded name**")
+        header_cols[1].markdown("**Status**")
+        header_cols[2].markdown("**Map to (subject list)**")
+        st.divider()
+
+        pending_accepts: dict[str, str] = {}
+
+        for src in sorted(needs_review):
+            suggestion, score, mtype = needs_review[src]
+            icon = "⚠️" if mtype in ("fuzzy", "possible") else "❌"
+            score_str = f"{score:.0%}" if score > 0 else "—"
+
+            c1, c2, c3 = st.columns([3, 1, 3])
+            with c1:
+                st.markdown(f"**{src}**")
+            with c2:
+                st.caption(f"{icon} {score_str}")
+            with c3:
+                options = ["— keep as-is —"] + sorted(canonical_subjects)
+                try:
+                    default_idx = options.index(suggestion) if suggestion in options else 0
+                except ValueError:
+                    default_idx = 0
+
+                chosen = st.selectbox(
+                    "Map to:",
+                    options,
+                    index=default_idx,
+                    key=f"{key_prefix}map_{src}",
+                    label_visibility="collapsed",
+                )
+                if chosen != "— keep as-is —":
+                    pending_accepts[src] = chosen
+
+        if accept_all_clicked:
+            for src, (suggestion, score, mtype) in needs_review.items():
+                if mtype in ("fuzzy", "alias") and suggestion in canonical_subjects:
+                    saved_overrides[src] = suggestion
+            st.session_state[ss_key] = saved_overrides
+            st.rerun()
+
+        if st.button("Apply selected mappings", key=f"{key_prefix}apply"):
+            saved_overrides.update(pending_accepts)
+            st.session_state[ss_key] = saved_overrides
+            st.rerun()
+
+    st.session_state[ss_key] = saved_overrides
+    # Rebuild effective map with any pending user selections not yet saved
+    for src, canon in pending_accepts.items():
+        effective_map[src] = canon
+    return effective_map
