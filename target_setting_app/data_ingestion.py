@@ -481,36 +481,45 @@ def _is_truthy(val) -> bool:
 
 
 def _detect_subject_format(df: pd.DataFrame, non_name_cols: list[str]) -> str:
-    """Return 'long' or 'wide'."""
+    """Return 'long' or 'wide'.
+
+    Long  — one (or very few) columns whose cell values are subject names,
+            often comma-separated.
+    Wide  — one column per subject with binary presence flags (0/1/Y/blank).
+            May also contain non-subject metadata columns (Form, Year Group,
+            etc.) — these are tolerated as long as the majority of non-name
+            columns are binary.
+    """
     if len(non_name_cols) == 0:
         return "wide"
-    if len(non_name_cols) == 1:
-        col = non_name_cols[0]
-        sample = df[col].dropna().head(5)
-        if sample.apply(lambda v: "," in str(v)).any():
+
+    # Strongest long-format signal: any value contains a comma
+    for col in non_name_cols[:5]:
+        if df[col].dropna().head(10).apply(lambda v: "," in str(v)).any():
             return "long"
 
-    _BINARY_STRINGS = {"0", "1", "Y", "N", "YES", "NO", "TRUE", "FALSE", "X", ""}
+    _BINARY_UPPER = {"", "0", "1", "Y", "N", "YES", "NO", "TRUE", "FALSE", "X", "✓"}
 
-    def _is_binary_val(v) -> bool:
-        if pd.isna(v):
-            return True
-        if isinstance(v, (int, float)):
-            return v in (0, 1, 0.0, 1.0)
-        return str(v).strip().upper() in _BINARY_STRINGS
+    def _col_is_binary(col: str) -> bool:
+        """True if ≥80 % of non-null values look like binary presence flags."""
+        non_null = df[col].dropna().head(20)
+        if len(non_null) == 0:
+            return True  # empty column — treat as binary (absent = not taking)
 
-    # Score binary-ness across up to 5 subject columns for robustness
-    cols_to_check = non_name_cols[:min(5, len(non_name_cols))]
-    scores = []
-    for col in cols_to_check:
-        vals = df[col].head(20)
-        if len(vals) == 0:
-            continue
-        scores.append(vals.apply(_is_binary_val).mean())
+        def _is_bin(v) -> bool:
+            if isinstance(v, bool):
+                return True
+            if isinstance(v, (int, float)):
+                return v in (0, 1, 0.0, 1.0)
+            return str(v).strip().upper() in _BINARY_UPPER
 
-    if scores and (sum(scores) / len(scores)) > 0.6:
-        return "wide"
-    return "long"
+        return non_null.apply(_is_bin).mean() >= 0.8
+
+    # Check ALL non-name columns; wide if the majority are binary.
+    # Using all columns (not just the first 5) means non-subject metadata
+    # columns (Form, Year Group, ID…) are tolerated without skewing the result.
+    n_binary = sum(_col_is_binary(c) for c in non_name_cols)
+    return "wide" if n_binary > len(non_name_cols) / 2 else "long"
 
 
 # ---------------------------------------------------------------------------
