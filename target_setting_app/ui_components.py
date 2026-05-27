@@ -173,34 +173,20 @@ def render_gcse_matrix(
     st.dataframe(display_df, use_container_width=True, height=400)
 
     # Override editor
-    with st.expander("Edit Individual Target Overrides"):
-        st.info("Select a student and subject below to override their target.")
-        student_options = [
-            f"{r['Surname']}, {r['Forename']}" for r in display_rows
-        ]
-        sel_student = st.selectbox("Student", student_options, key="override_student_gcse")
-        sel_subject = st.selectbox("Subject", subject_cols, key="override_subject_gcse")
-        sel_grade = st.selectbox(
-            "New Target Grade", list(range(9, 0, -1)), key="override_grade_gcse"
+    with st.expander("Edit Individual Student Targets"):
+        overrides = render_student_editor(
+            df_display, overrides, subject_cols,
+            mode="GCSE", key_prefix="sted_gcse_",
         )
-        if st.button("Apply Override", key="apply_override_gcse"):
-            if sel_student and sel_subject:
-                surname, forename = sel_student.split(", ", 1)
-                student_key = f"{surname}|{forename}"
-                if student_key not in overrides:
-                    overrides[student_key] = {}
-                overrides[student_key][sel_subject] = sel_grade
-                st.success(f"Override set: {sel_student} — {sel_subject} → {sel_grade}")
-                st.rerun()
-
         if overrides:
-            st.markdown("**Current overrides:**")
+            st.divider()
+            st.markdown("**All active overrides:**")
             override_rows = []
             for sk, subj_dict in overrides.items():
                 sn, fn = sk.split("|", 1)
                 for subj, grade in subj_dict.items():
-                    override_rows.append({"Student": f"{sn}, {fn}", "Subject": subj, "Grade": grade})
-            st.dataframe(pd.DataFrame(override_rows), use_container_width=True)
+                    override_rows.append({"Student": f"{sn.title()}, {fn.title()}", "Subject": subj, "Grade": grade})
+            st.dataframe(pd.DataFrame(override_rows), use_container_width=True, hide_index=True)
             if st.button("Clear All Overrides", key="clear_overrides_gcse"):
                 overrides.clear()
                 st.rerun()
@@ -277,31 +263,20 @@ def render_alevel_matrix(
     st.dataframe(display_df, use_container_width=True, height=400)
 
     # Override editor
-    with st.expander("Edit Individual Target Overrides"):
-        student_options = [f"{r['Surname']}, {r['Forename']}" for r in display_rows]
-        sel_student = st.selectbox("Student", student_options, key="override_student_al")
-        sel_subject = st.selectbox("Subject", subject_cols, key="override_subject_al")
-        sel_grade = st.selectbox(
-            "New Target Grade", ALEVEL_GRADES_ORDERED, key="override_grade_al"
+    with st.expander("Edit Individual Student Targets"):
+        overrides = render_student_editor(
+            df_display, overrides, subject_cols,
+            mode="AL", key_prefix="sted_al_",
         )
-        if st.button("Apply Override", key="apply_override_al"):
-            if sel_student and sel_subject:
-                surname, forename = sel_student.split(", ", 1)
-                student_key = f"{surname}|{forename}"
-                if student_key not in overrides:
-                    overrides[student_key] = {}
-                overrides[student_key][sel_subject] = sel_grade
-                st.success(f"Override set: {sel_student} — {sel_subject} → {sel_grade}")
-                st.rerun()
-
         if overrides:
-            st.markdown("**Current overrides:**")
+            st.divider()
+            st.markdown("**All active overrides:**")
             override_rows = []
             for sk, subj_dict in overrides.items():
                 sn, fn = sk.split("|", 1)
                 for subj, grade in subj_dict.items():
-                    override_rows.append({"Student": f"{sn}, {fn}", "Subject": subj, "Grade": grade})
-            st.dataframe(pd.DataFrame(override_rows), use_container_width=True)
+                    override_rows.append({"Student": f"{sn.title()}, {fn.title()}", "Subject": subj, "Grade": grade})
+            st.dataframe(pd.DataFrame(override_rows), use_container_width=True, hide_index=True)
             if st.button("Clear All Overrides", key="clear_overrides_al"):
                 overrides.clear()
                 st.rerun()
@@ -534,24 +509,36 @@ def render_grade_distribution_chart(targets_df: pd.DataFrame, mode: str) -> None
     """Grade distribution pivot table per subject."""
     if mode == "GCSE":
         grade_order = [str(g) for g in range(9, 0, -1)]
-        meta_cols = {"surname", "forename", "form", "overall_score", "avg_gcse"}
     else:
         grade_order = ["A*", "A", "B", "C", "D", "E"]
-        meta_cols = {"surname", "forename", "year_group", "overall_score", "avg_gcse"}
 
-    subj_cols = sorted([c for c in targets_df.columns if c not in meta_cols])
+    meta_cols = {"surname", "forename", "form", "year_group", "overall_score", "avg_gcse"}
+    subj_cols = sorted([c for c in targets_df.columns if c.lower() not in meta_cols and c not in meta_cols])
     if not subj_cols:
         return
 
+    def _to_grade_str(v: object) -> str | None:
+        """Normalise a grade value to a string label (e.g. 7.0 → '7')."""
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            return None
+        s = str(v).strip()
+        if s.lower() in ("nan", "n/a", ""):
+            return None
+        if mode == "GCSE":
+            try:
+                return str(int(round(float(s))))
+            except (ValueError, TypeError):
+                pass
+        return s
+
     rows = []
     for subj in subj_cols:
-        col = targets_df[subj].dropna()
-        col = col[col.astype(str) != "N/A"]
+        col_raw = targets_df[subj]
+        col_str = col_raw.apply(_to_grade_str).dropna()
         row = {"Subject": subj}
-        total = len(col)
+        total = len(col_str)
         for grade in grade_order:
-            n = (col.astype(str) == str(grade)).sum()
-            row[grade] = n
+            row[grade] = int((col_str == grade).sum())
         row["n"] = total
         rows.append(row)
 
@@ -565,3 +552,234 @@ def render_grade_distribution_chart(targets_df: pd.DataFrame, mode: str) -> None
     st.markdown("#### Grade Distribution by Subject")
     st.caption("Count of students at each grade. 'n' = students with a prediction for that subject.")
     st.dataframe(chart_df, use_container_width=True)
+
+
+def render_student_editor(
+    df_display: pd.DataFrame,
+    overrides: dict,
+    subject_cols: list[str],
+    mode: str = "GCSE",
+    key_prefix: str = "sted_gcse_",
+) -> dict:
+    """
+    Full per-student target editor.
+    Shows a student selector and a table of their current targets.
+    Returns the (possibly updated) overrides dict.
+    """
+    from target_engine import ALEVEL_GRADES_ORDERED, ALEVEL_GRADE_MAP
+
+    if mode == "GCSE":
+        grade_options: list = list(range(9, 0, -1))
+    else:
+        grade_options = ALEVEL_GRADES_ORDERED
+
+    # Build sorted student list
+    students: list[tuple[str, str]] = sorted(
+        {(str(row["surname"]).strip(), str(row["forename"]).strip())
+         for _, row in df_display.iterrows()
+         if pd.notna(row.get("surname")) and pd.notna(row.get("forename"))},
+        key=lambda x: (x[0].lower(), x[1].lower()),
+    )
+    if not students:
+        return overrides
+
+    display_opts = [f"{sn.title()}, {fn.title()}" for sn, fn in students]
+    sel_idx = st.selectbox(
+        "Select student",
+        range(len(display_opts)),
+        format_func=lambda i: display_opts[i],
+        key=f"{key_prefix}sel",
+    )
+    if sel_idx is None:
+        return overrides
+
+    sn, fn = students[sel_idx]
+    student_key = f"{sn.lower()}|{fn.lower()}"
+
+    mask = (
+        (df_display["surname"].str.lower() == sn.lower())
+        & (df_display["forename"].str.lower() == fn.lower())
+    )
+    rows_match = df_display[mask]
+    if rows_match.empty:
+        st.warning("Student not found in targets DataFrame.")
+        return overrides
+
+    student_row = rows_match.iloc[0]
+    existing_student_overrides = overrides.get(student_key, {})
+
+    # Build a preview table of current targets
+    preview = []
+    for subj in subject_cols:
+        val = student_row.get(subj)
+        if pd.notna(val) and val not in ("", "N/A", None):
+            is_ovr = subj in existing_student_overrides
+            try:
+                disp = str(int(round(float(val)))) if mode == "GCSE" else str(val)
+            except (ValueError, TypeError):
+                disp = str(val)
+            preview.append({
+                "Subject": subj,
+                "Current Target": disp,
+                "Overridden": "🔧" if is_ovr else "",
+            })
+
+    if preview:
+        st.dataframe(
+            pd.DataFrame(preview),
+            use_container_width=True,
+            hide_index=True,
+            height=min(200, 35 + 35 * len(preview)),
+        )
+
+    st.markdown("**Set a new target for one subject:**")
+    c1, c2, c3 = st.columns([3, 2, 2])
+    with c1:
+        sel_subj = st.selectbox("Subject", subject_cols, key=f"{key_prefix}subj")
+    with c2:
+        # Pre-fill current value
+        cur_val = student_row.get(sel_subj)
+        try:
+            cur_grade = int(round(float(cur_val))) if mode == "GCSE" else str(cur_val)
+        except (TypeError, ValueError):
+            cur_grade = grade_options[0]
+        default_idx = grade_options.index(cur_grade) if cur_grade in grade_options else 0
+        sel_grade = st.selectbox(
+            "New Grade", grade_options, index=default_idx, key=f"{key_prefix}grade"
+        )
+    with c3:
+        st.write("")
+        st.write("")
+        if st.button("Apply", key=f"{key_prefix}apply", type="primary"):
+            if student_key not in overrides:
+                overrides[student_key] = {}
+            overrides[student_key][sel_subj] = sel_grade
+            st.success(f"Set {sn.title()} {fn.title()} — {sel_subj} → {sel_grade}")
+            st.rerun()
+
+    # Clear student overrides
+    if existing_student_overrides:
+        st.caption(f"{len(existing_student_overrides)} override(s) active for this student.")
+        if st.button(
+            f"Clear all overrides for {sn.title()} {fn.title()}",
+            key=f"{key_prefix}clear_student",
+            type="secondary",
+        ):
+            overrides.pop(student_key, None)
+            st.rerun()
+
+    return overrides
+
+
+def render_historical_comparison(
+    targets_df: pd.DataFrame,
+    historical_df: pd.DataFrame,
+    mode: str = "GCSE",
+) -> None:
+    """
+    Compare current target grade distribution against historical outcomes per subject.
+    """
+    from historical_adapter import aggregate_historical, compare_targets_to_historical
+
+    if historical_df is None or historical_df.empty:
+        st.info("No historical results loaded.")
+        return
+
+    grades = [str(g) for g in range(9, 0, -1)] if mode == "GCSE" else ["A*", "A", "B", "C", "D", "E"]
+
+    hist_agg = aggregate_historical(historical_df, mode)
+    if hist_agg.empty:
+        st.warning("Historical data could not be aggregated.")
+        return
+
+    cmp = compare_targets_to_historical(targets_df, hist_agg, mode)
+    if cmp.empty:
+        st.info(
+            "No subjects overlap between current targets and historical data. "
+            "Check that subject names match exactly."
+        )
+        return
+
+    # ---- Summary table (one row per subject) ----
+    years_present = sorted(historical_df["Year"].unique()) if "Year" in historical_df.columns else []
+    if len(years_present) > 1:
+        st.caption(f"Historical data covers: {', '.join(str(y) for y in years_present)}")
+
+    st.markdown("#### Target vs Historical Distribution")
+    st.caption(
+        "Shows current target grade distribution alongside historical outcomes. "
+        "Δ = target% − historical%  (positive = targeting higher than historical)."
+    )
+
+    # Compact view: highlight top grade and avg delta
+    summary_rows = []
+    top_grade = grades[0]  # "9" or "A*"
+    for _, row in cmp.iterrows():
+        t_top = row.get(f"{top_grade}_target%", 0)
+        h_top = row.get(f"{top_grade}_hist%", 0)
+        delta_top = row.get(f"{top_grade}_Δ", 0)
+        avg_t = row.get("avg_target", "")
+        avg_h = row.get("avg_hist", "")
+        avg_d = row.get("avg_Δ", "")
+
+        if isinstance(delta_top, (int, float)):
+            if delta_top > 5:
+                signal = "🔼 Higher"
+            elif delta_top < -5:
+                signal = "🔽 Lower"
+            else:
+                signal = "➡ Similar"
+        else:
+            signal = "—"
+
+        summary_rows.append({
+            "Subject": row["Subject"],
+            "n (targets)": int(row.get("n_students", 0)),
+            f"{top_grade} target%": f"{t_top:.0f}%",
+            f"{top_grade} hist%": f"{h_top:.0f}%",
+            f"{top_grade} Δ": f"{delta_top:+.1f}%" if isinstance(delta_top, (int, float)) else "—",
+            "Avg target": avg_t,
+            "Avg hist": avg_h,
+            "Avg Δ": f"{avg_d:+.2f}" if isinstance(avg_d, (int, float)) else "—",
+            "Trend": signal,
+        })
+
+    st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+
+    # Per-subject drill-down
+    with st.expander("Subject drill-down (full grade breakdown)"):
+        subj_choices = cmp["Subject"].tolist()
+        sel_subj = st.selectbox("Subject", subj_choices, key="hist_cmp_subj_sel")
+        if sel_subj:
+            subj_row = cmp[cmp["Subject"] == sel_subj].iloc[0]
+            detail_rows = []
+            for g in grades:
+                t_pct = subj_row.get(f"{g}_target%", 0)
+                h_pct = subj_row.get(f"{g}_hist%", 0)
+                delta  = subj_row.get(f"{g}_Δ", 0)
+                detail_rows.append({
+                    "Grade": g,
+                    "Target %": f"{t_pct:.1f}%",
+                    "Historical %": f"{h_pct:.1f}%",
+                    "Δ": f"{delta:+.1f}%" if isinstance(delta, (int, float)) else "—",
+                })
+            st.dataframe(
+                pd.DataFrame(detail_rows),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    # Year-by-year view if multiple years
+    if len(years_present) > 1:
+        with st.expander("Year-by-year historical breakdown"):
+            subj_choices2 = sorted(
+                s for s in targets_df.columns
+                if s not in {"surname", "forename", "form", "year_group", "overall_score", "avg_gcse"}
+                and s in historical_df["Subject"].values
+            )
+            if subj_choices2:
+                sel_subj2 = st.selectbox("Subject", subj_choices2, key="hist_year_subj_sel")
+                yearly = historical_df[historical_df["Subject"] == sel_subj2]
+                if not yearly.empty:
+                    display_cols = ["Year"] + [g for g in grades if g in yearly.columns] + ["n"]
+                    st.dataframe(yearly[display_cols], use_container_width=True, hide_index=True)

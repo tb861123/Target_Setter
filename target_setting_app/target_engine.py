@@ -446,28 +446,22 @@ def apply_further_maths_cap(df: pd.DataFrame, mode: str = "GCSE") -> pd.DataFram
         return df
     result = df.copy()
     if mode == "GCSE":
-        for idx in result.index:
-            m = result.at[idx, "Mathematics"]
-            f = result.at[idx, "Further Mathematics"]
-            try:
-                if pd.notna(m) and pd.notna(f) and isinstance(m, (int, float)) and isinstance(f, (int, float)):
-                    if f > m:
-                        result.at[idx, "Further Mathematics"] = m
-            except (TypeError, ValueError):
-                pass
+        # Vectorised: convert both columns to numeric, cap, write back as int where valid
+        m_num = pd.to_numeric(result["Mathematics"], errors="coerce")
+        f_num = pd.to_numeric(result["Further Mathematics"], errors="coerce")
+        needs_cap = f_num.notna() & m_num.notna() & (f_num > m_num)
+        result.loc[needs_cap, "Further Mathematics"] = m_num[needs_cap].astype(
+            result["Further Mathematics"].dtype
+        )
     else:  # A Level — higher GRADE_MAP number = better grade
-        for idx in result.index:
-            m = result.at[idx, "Mathematics"]
-            f = result.at[idx, "Further Mathematics"]
-            if m in (None, "N/A", "") or f in (None, "N/A", ""):
-                continue
-            try:
-                m_num = ALEVEL_GRADE_MAP.get(m)
-                f_num = ALEVEL_GRADE_MAP.get(f)
-                if m_num is not None and f_num is not None and f_num > m_num:
-                    result.at[idx, "Further Mathematics"] = m
-            except (TypeError, ValueError):
-                pass
+        m_mapped = result["Mathematics"].map(ALEVEL_GRADE_MAP)
+        f_mapped = result["Further Mathematics"].map(ALEVEL_GRADE_MAP)
+        needs_cap = (
+            m_mapped.notna()
+            & f_mapped.notna()
+            & (f_mapped > m_mapped)
+        )
+        result.loc[needs_cap, "Further Mathematics"] = result.loc[needs_cap, "Mathematics"]
     return result
 
 

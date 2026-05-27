@@ -50,6 +50,8 @@ from templates import (
     template_subject_list_long,
     template_subject_list_wide,
     template_subject_list_timetable,
+    template_historical_gcse,
+    template_historical_alevel,
 )
 from ui_components import (
     render_distribution_inputs,
@@ -59,7 +61,9 @@ from ui_components import (
     render_validation_warnings,
     render_matching_dashboard,
     render_grade_distribution_chart,
+    render_historical_comparison,
 )
+from historical_adapter import parse_historical_results
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -247,11 +251,21 @@ def _do_alevel_generate() -> None:
             _gcse_w = st.session_state.get("al_gcse_wide_df")
             if _gcse_w is not None:
                 _gw = _gcse_w.copy()
-                _gw["_key"] = _gw["Surname"].str.strip().str.lower() + "|" + _gw["Forename"].str.strip().str.lower()
+                _gw["_key"] = (
+                    _gw["Surname"].astype(str).str.strip().str.lower()
+                    + "|"
+                    + _gw["Forename"].astype(str).str.strip().str.lower()
+                )
                 _skip = {"Surname", "Forename", "_key"}
                 _num_cols = [c for c in _gw.columns if c not in _skip]
                 _gw["avg_gcse"] = _gw[_num_cols].apply(pd.to_numeric, errors="coerce").mean(axis=1)
-                targets["_key"] = targets["surname"].str.strip().str.lower() + "|" + targets["forename"].str.strip().str.lower()
+                # Drop any pre-existing _key column to prevent _key_x/_key_y collision
+                targets = targets.drop(columns=["_key"], errors="ignore")
+                targets["_key"] = (
+                    targets["surname"].astype(str).str.strip().str.lower()
+                    + "|"
+                    + targets["forename"].astype(str).str.strip().str.lower()
+                )
                 targets = targets.merge(_gw[["_key", "avg_gcse"]], on="_key", how="left")
                 targets = targets.drop(columns=["_key"])
 
@@ -586,6 +600,9 @@ def _init_state() -> None:
         "al_subject_pct_overrides": {},
         "gcse_cap_further_maths": False,
         "al_cap_further_maths": False,
+        # Historical results
+        "gcse_historical_df": None,
+        "al_historical_df": None,
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -835,6 +852,43 @@ if mode == "GCSE":
             except Exception as e:
                 st.error(f"Error parsing predictions file: {e}")
 
+        st.divider()
+        st.subheader("Historical GCSE Results (optional)")
+        st.caption(
+            "Upload previous year(s) results to compare current targets against "
+            "historical outcomes. Accepted formats: wide (Subject | Year | 9 | 8 | … | 1) "
+            "or long (Subject | Year | Grade | Count). Year column is optional."
+        )
+        st.download_button(
+            "📥 Download historical GCSE template",
+            data=template_historical_gcse(),
+            file_name="Template_Historical_GCSE.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="dl_hist_gcse_tmpl",
+        )
+        hist_gcse_file = st.file_uploader(
+            "Upload historical GCSE results (.xlsx or .csv)",
+            type=["xlsx", "xls", "csv"],
+            key="gcse_hist_upload",
+        )
+        if hist_gcse_file:
+            try:
+                hist_df, hist_warns = parse_historical_results(hist_gcse_file, mode="GCSE")
+                st.session_state["gcse_historical_df"] = hist_df if not hist_df.empty else None
+                for w in hist_warns:
+                    st.info(w) if "Loaded" in w else st.warning(w)
+            except Exception as e:
+                st.error(f"Error parsing historical results: {e}")
+
+        if st.session_state.get("gcse_historical_df") is not None:
+            _h = st.session_state["gcse_historical_df"]
+            _years = sorted(_h["Year"].unique())
+            n_subj = _h["Subject"].nunique()
+            st.success(
+                f"Historical data loaded: {n_subj} subjects, "
+                f"year(s): {', '.join(str(y) for y in _years)}."
+            )
+
         if st.session_state.get("gcse_warnings"):
             render_validation_warnings(st.session_state["gcse_warnings"], [])
 
@@ -1076,6 +1130,13 @@ if mode == "GCSE":
                     )
                 with st.expander("Grade Distribution Chart", expanded=False):
                     render_grade_distribution_chart(df, "GCSE")
+                if st.session_state.get("gcse_historical_df") is not None:
+                    with st.expander("Historical Comparison", expanded=False):
+                        render_historical_comparison(
+                            df,
+                            st.session_state["gcse_historical_df"],
+                            mode="GCSE",
+                        )
                 _nav_buttons(back=True, forward_label="Next: Review Matrix →", forward_key="gcse_s2")
             else:
                 _nav_buttons(back=True, forward_label="", forward_key="gcse_s2_empty")
@@ -1113,6 +1174,14 @@ if mode == "GCSE":
                 dept_adj,
             )
             st.session_state["overrides"] = updated_overrides
+
+            if st.session_state.get("gcse_historical_df") is not None:
+                with st.expander("Historical Comparison", expanded=False):
+                    render_historical_comparison(
+                        df,
+                        st.session_state["gcse_historical_df"],
+                        mode="GCSE",
+                    )
 
             _nav_buttons(back=True, forward_label="Next: Export →", forward_key="gcse_s3")
 
@@ -1404,6 +1473,43 @@ else:
                         _al_filtered["subjects"].apply(len) > 0
                     ].reset_index(drop=True)
                 st.session_state["al_subject_list_df"] = _al_filtered
+
+        st.divider()
+        st.subheader("Historical A Level Results (optional)")
+        st.caption(
+            "Upload previous year(s) A Level results to compare current targets against "
+            "historical outcomes. Accepted formats: wide (Subject | Year | A* | A | … | E) "
+            "or long (Subject | Year | Grade | Count)."
+        )
+        st.download_button(
+            "📥 Download historical A Level template",
+            data=template_historical_alevel(),
+            file_name="Template_Historical_ALevel.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="dl_hist_al_tmpl",
+        )
+        hist_al_file = st.file_uploader(
+            "Upload historical A Level results (.xlsx or .csv)",
+            type=["xlsx", "xls", "csv"],
+            key="al_hist_upload",
+        )
+        if hist_al_file:
+            try:
+                hist_al_df, hist_al_warns = parse_historical_results(hist_al_file, mode="AL")
+                st.session_state["al_historical_df"] = hist_al_df if not hist_al_df.empty else None
+                for w in hist_al_warns:
+                    st.info(w) if "Loaded" in w else st.warning(w)
+            except Exception as e:
+                st.error(f"Error parsing historical results: {e}")
+
+        if st.session_state.get("al_historical_df") is not None:
+            _h_al = st.session_state["al_historical_df"]
+            _years_al = sorted(_h_al["Year"].unique())
+            n_subj_al = _h_al["Subject"].nunique()
+            st.success(
+                f"Historical data loaded: {n_subj_al} subjects, "
+                f"year(s): {', '.join(str(y) for y in _years_al)}."
+            )
 
         if st.session_state.get("al_warnings"):
             render_validation_warnings(st.session_state["al_warnings"], [])
@@ -1873,6 +1979,13 @@ else:
                     )
                 with st.expander("Grade Distribution Chart", expanded=False):
                     render_grade_distribution_chart(df, "AL")
+                if st.session_state.get("al_historical_df") is not None:
+                    with st.expander("Historical Comparison", expanded=False):
+                        render_historical_comparison(
+                            df,
+                            st.session_state["al_historical_df"],
+                            mode="AL",
+                        )
                 _nav_buttons(back=True, forward_label="Next: Review Matrix →", forward_key="al_s2")
             else:
                 _nav_buttons(back=True, forward_label="", forward_key="al_s2_empty")
@@ -1910,6 +2023,14 @@ else:
                 dept_adj,
             )
             st.session_state["overrides"] = updated_overrides
+
+            if st.session_state.get("al_historical_df") is not None:
+                with st.expander("Historical Comparison", expanded=False):
+                    render_historical_comparison(
+                        df,
+                        st.session_state["al_historical_df"],
+                        mode="AL",
+                    )
 
             _nav_buttons(back=True, forward_label="Next: Export →", forward_key="al_s3")
 
