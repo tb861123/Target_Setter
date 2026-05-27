@@ -242,36 +242,40 @@ def template_subject_list_wide() -> bytes:
 
 
 def template_historical_gcse() -> bytes:
-    """Historical GCSE results — wide format template."""
-    gcse_grades = [str(g) for g in range(9, 0, -1)]
+    """Historical GCSE results — cumulative % format template."""
+    cum_labels = [str(9)] + [f"{g}+" for g in range(8, 1, -1)]  # 9, 8+, 7+, …, 2+
 
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Historical GCSE"
-    ws.cell(1, 1, "Historical GCSE Results — wide format (counts per grade)").font = _TITLE_FONT
+    ws.cell(1, 1, "Historical GCSE Results — cumulative % format").font = _TITLE_FONT
+    _note(ws, 2, "Each value = % of students achieving that grade or above. n = cohort size.")
 
-    _hrow(ws, 2, ["Subject", "Year"] + gcse_grades + ["n"])
+    _hrow(ws, 3, ["Subject", "Year"] + cum_labels + ["n"])
 
-    sample_data = [
-        ("Mathematics", "2024/25", {9: 12, 8: 18, 7: 24, 6: 20, 5: 15, 4: 8, 3: 2, 2: 1, 1: 0}),
-        ("English Language", "2024/25", {9: 8, 8: 14, 7: 20, 6: 25, 5: 18, 4: 12, 3: 3, 2: 0, 1: 0}),
-        ("Biology", "2024/25", {9: 10, 8: 16, 7: 22, 6: 18, 5: 14, 4: 10, 3: 5, 2: 2, 1: 1}),
+    # Sample data: raw counts → cumulative %
+    _raw = [
+        ("Mathematics",     "2024/25", {9:12, 8:18, 7:24, 6:20, 5:15, 4:8, 3:2, 2:1, 1:0}),
+        ("English Language","2024/25", {9:8,  8:14, 7:20, 6:25, 5:18, 4:12,3:3, 2:0, 1:0}),
+        ("Biology",         "2024/25", {9:10, 8:16, 7:22, 6:18, 5:14, 4:10,3:5, 2:2, 1:1}),
     ]
-    for r_idx, (subj, yr, counts) in enumerate(sample_data, 3):
+    for r_idx, (subj, yr, counts) in enumerate(_raw, 4):
         total = sum(counts.values())
-        row_vals = [subj, yr] + [counts.get(g, 0) for g in range(9, 0, -1)] + [total]
+        cum_vals = []
+        cumsum = 0
+        for g in range(9, 1, -1):
+            cumsum += counts.get(g, 0)
+            cum_vals.append(round(cumsum / total * 100, 1) if total else 0)
+        row_vals = [subj, yr] + cum_vals + [total]
         for c_idx, val in enumerate(row_vals, 1):
             c = ws.cell(r_idx, c_idx, val)
             c.fill = _SAMPLE_FILL
             if c_idx > 2:
                 c.alignment = Alignment(horizontal="center")
 
-    _note(ws, len(sample_data) + 4,
-          "Tip: Year column is optional. Values can be counts or percentages. "
-          "You can include multiple years — use one row per subject per year.")
     _autofit(ws, mn=5, mx=20)
-    for col_idx in range(3, 3 + len(gcse_grades) + 2):
-        ws.column_dimensions[get_column_letter(col_idx)].width = 6
+    for col_idx in range(3, 3 + len(cum_labels) + 2):
+        ws.column_dimensions[get_column_letter(col_idx)].width = 7
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -279,36 +283,40 @@ def template_historical_gcse() -> bytes:
 
 
 def template_historical_alevel() -> bytes:
-    """Historical A Level results — wide format template."""
-    al_grades = ["A*", "A", "B", "C", "D", "E"]
+    """Historical A Level results — cumulative % format template."""
+    cum_labels = ["A*", "A*-A", "A*-B", "A*-C", "A*-D", "A*-E"]
+    al_order   = ["A*", "A", "B", "C", "D", "E"]
 
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Historical A Level"
-    ws.cell(1, 1, "Historical A Level Results — wide format (counts per grade)").font = _TITLE_FONT
+    ws.cell(1, 1, "Historical A Level Results — cumulative % format").font = _TITLE_FONT
+    _note(ws, 2, "Each value = % of students achieving that grade or above. n = cohort size.")
 
-    _hrow(ws, 2, ["Subject", "Year"] + al_grades + ["n"])
+    _hrow(ws, 3, ["Subject", "Year"] + cum_labels + ["n"])
 
-    sample_data = [
-        ("Mathematics", "2024/25", {"A*": 8, "A": 14, "B": 12, "C": 8, "D": 4, "E": 2}),
-        ("Biology", "2024/25", {"A*": 5, "A": 12, "B": 15, "C": 10, "D": 5, "E": 2}),
+    _raw = [
+        ("Mathematics",        "2024/25", {"A*": 8, "A": 14, "B": 12, "C": 8, "D": 4, "E": 2}),
+        ("Biology",            "2024/25", {"A*": 5, "A": 12, "B": 15, "C": 10, "D": 5, "E": 2}),
         ("English Literature", "2024/25", {"A*": 3, "A": 10, "B": 14, "C": 12, "D": 6, "E": 3}),
     ]
-    for r_idx, (subj, yr, counts) in enumerate(sample_data, 3):
+    for r_idx, (subj, yr, counts) in enumerate(_raw, 4):
         total = sum(counts.values())
-        row_vals = [subj, yr] + [counts.get(g, 0) for g in al_grades] + [total]
+        cum_vals = []
+        cumsum = 0
+        for g in al_order:
+            cumsum += counts.get(g, 0)
+            cum_vals.append(round(cumsum / total * 100, 1) if total else 0)
+        row_vals = [subj, yr] + cum_vals + [total]
         for c_idx, val in enumerate(row_vals, 1):
             c = ws.cell(r_idx, c_idx, val)
             c.fill = _SAMPLE_FILL
             if c_idx > 2:
                 c.alignment = Alignment(horizontal="center")
 
-    _note(ws, len(sample_data) + 4,
-          "Tip: Year column is optional. Values can be counts or percentages. "
-          "You can include multiple years — use one row per subject per year.")
     _autofit(ws, mn=5, mx=20)
-    for col_idx in range(3, 3 + len(al_grades) + 2):
-        ws.column_dimensions[get_column_letter(col_idx)].width = 7
+    for col_idx in range(3, 3 + len(cum_labels) + 2):
+        ws.column_dimensions[get_column_letter(col_idx)].width = 8
 
     buf = io.BytesIO()
     wb.save(buf)

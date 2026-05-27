@@ -306,16 +306,19 @@ def render_matching_dashboard(
     source_keys: dict[str, list[str]],
     ss_key: str = "match_overrides",
     key_prefix: str = "md_",
+    deleted_ss_key: str = "gcse_deleted_students",
 ) -> None:
     """
     Display cross-source student matching status and correction controls.
     Reads and writes match overrides via st.session_state[ss_key].
+    Deleted student keys are stored as a set in st.session_state[deleted_ss_key].
 
     Args:
-        master_keys:  list of 'surname|forename' keys from the subject list (source of truth)
-        source_keys:  {'Source Name': [keys...]} for each uploaded data source
-        ss_key:       session_state key under which overrides dict is stored
-        key_prefix:   prefix for all widget keys (avoids collisions between GCSE/A Level)
+        master_keys:     list of 'surname|forename' keys from the subject list (source of truth)
+        source_keys:     {'Source Name': [keys...]} for each uploaded data source
+        ss_key:          session_state key for overrides dict
+        key_prefix:      prefix for all widget keys (avoids collisions between GCSE/A Level)
+        deleted_ss_key:  session_state key for set of deleted student keys
     """
     from matching import match_sources, issues_only, summary_counts, STATUS_ICON
 
@@ -446,11 +449,20 @@ def render_matching_dashboard(
                 override_key = f"{src}::{mkey}"
                 wkey = f"{key_prefix}{src}_{mkey}"
 
-                options = ["(no change)"] + s_keys + ["(mark as unmatched)"]
+                options = [
+                    "(no change)",
+                    "(delete student)",
+                    "(ignore issue)",
+                ] + s_keys + ["(mark as unmatched)"]
 
                 # Determine pre-fill value
                 saved = current_overrides.get(override_key)
-                if saved == "__UNMATCHED__":
+                deleted_set = st.session_state.get(deleted_ss_key, set())
+                if mkey in deleted_set or saved == "__DELETED__":
+                    default = "(delete student)"
+                elif saved == "__IGNORED__":
+                    default = "(ignore issue)"
+                elif saved == "__UNMATCHED__":
                     default = "(mark as unmatched)"
                 elif saved and saved in s_keys:
                     default = saved
@@ -475,6 +487,7 @@ def render_matching_dashboard(
 
         if st.button("Save Matching Corrections", key=f"{key_prefix}save", type="primary"):
             new_overrides = dict(current_overrides)
+            new_deleted: set = set(st.session_state.get(deleted_ss_key, set()))
             for _, row in issues.iterrows():
                 mkey = row["master_key"]
                 issue_srcs = [
@@ -487,11 +500,21 @@ def render_matching_dashboard(
                     sel = st.session_state.get(wkey, "(no change)")
                     if sel == "(no change)":
                         new_overrides.pop(override_key, None)
+                        new_deleted.discard(mkey)
+                    elif sel == "(delete student)":
+                        new_overrides[override_key] = "__DELETED__"
+                        new_deleted.add(mkey)
+                    elif sel == "(ignore issue)":
+                        new_overrides[override_key] = "__IGNORED__"
+                        new_deleted.discard(mkey)
                     elif sel == "(mark as unmatched)":
                         new_overrides[override_key] = "__UNMATCHED__"
+                        new_deleted.discard(mkey)
                     else:
                         new_overrides[override_key] = sel
+                        new_deleted.discard(mkey)
             st.session_state[ss_key] = new_overrides
+            st.session_state[deleted_ss_key] = new_deleted
             st.success("Matching corrections saved.")
             st.rerun()
 
@@ -506,19 +529,33 @@ def render_matching_dashboard(
 
 
 def render_grade_distribution_chart(targets_df: pd.DataFrame, mode: str) -> None:
-    """Grade distribution pivot table per subject."""
+    """Grade distribution as cumulative percentage per subject."""
     if mode == "GCSE":
-        grade_order = [str(g) for g in range(9, 0, -1)]
+        # Cumulative from top: "9", "8+", "7+", ..., "2+"
+        cum_labels = [str(9)] + [f"{g}+" for g in range(8, 1, -1)]
+        cum_sets: dict[str, set] = {
+            str(9): {9},
+            **{f"{g}+": set(range(g, 10)) for g in range(8, 1, -1)},
+        }
     else:
-        grade_order = ["A*", "A", "B", "C", "D", "E"]
+        al_order = ["A*", "A", "B", "C", "D", "E"]
+        cum_labels = ["A*", "A*-A", "A*-B", "A*-C", "A*-D", "A*-E"]
+        cum_sets = {
+            "A*":   {"A*"},
+            "A*-A": {"A*", "A"},
+            "A*-B": {"A*", "A", "B"},
+            "A*-C": {"A*", "A", "B", "C"},
+            "A*-D": {"A*", "A", "B", "C", "D"},
+            "A*-E": {"A*", "A", "B", "C", "D", "E"},
+        }
 
     meta_cols = {"surname", "forename", "form", "year_group", "overall_score", "avg_gcse"}
     subj_cols = sorted([c for c in targets_df.columns if c.lower() not in meta_cols and c not in meta_cols])
     if not subj_cols:
         return
 
-    def _to_grade_str(v: object) -> str | None:
-        """Normalise a grade value to a string label (e.g. 7.0 → '7')."""
+    def _to_comparable(v: object):
+        """Return comparable grade value (int for GCSE, str for AL) or None."""
         if v is None or (isinstance(v, float) and pd.isna(v)):
             return None
         s = str(v).strip()
@@ -526,31 +563,33 @@ def render_grade_distribution_chart(targets_df: pd.DataFrame, mode: str) -> None
             return None
         if mode == "GCSE":
             try:
-                return str(int(round(float(s))))
+                return int(round(float(s)))
             except (ValueError, TypeError):
-                pass
+                return None
         return s
 
     rows = []
     for subj in subj_cols:
-        col_raw = targets_df[subj]
-        col_str = col_raw.apply(_to_grade_str).dropna()
-        row = {"Subject": subj}
-        total = len(col_str)
-        for grade in grade_order:
-            row[grade] = int((col_str == grade).sum())
-        row["n"] = total
+        col_comp = targets_df[subj].apply(_to_comparable).dropna()
+        n = len(col_comp)
+        row: dict = {"Subject": subj}
+        for label in cum_labels:
+            gs = cum_sets[label]
+            count = int(col_comp.apply(lambda v: v in gs).sum())
+            row[label] = f"{count / n * 100:.1f}%" if n > 0 else "—"
+        row["n"] = n
         rows.append(row)
 
     if not rows:
         return
 
     chart_df = pd.DataFrame(rows).set_index("Subject")
-    cols_present = [g for g in grade_order if g in chart_df.columns]
-    chart_df = chart_df[cols_present + ["n"]]
 
-    st.markdown("#### Grade Distribution by Subject")
-    st.caption("Count of students at each grade. 'n' = students with a prediction for that subject.")
+    st.markdown("#### Grade Distribution by Subject (cumulative %)")
+    st.caption(
+        "Each column shows the % of students at or above that grade threshold. "
+        "'n' = students with a prediction for that subject."
+    )
     st.dataframe(chart_df, use_container_width=True)
 
 
@@ -677,15 +716,22 @@ def render_historical_comparison(
     mode: str = "GCSE",
 ) -> None:
     """
-    Compare current target grade distribution against historical outcomes per subject.
+    Compare current target cumulative % against historical outcomes per subject.
     """
-    from historical_adapter import aggregate_historical, compare_targets_to_historical
+    from historical_adapter import (
+        aggregate_historical,
+        compare_targets_to_historical,
+        GCSE_CUM_LABELS,
+        ALEVEL_CUM_LABELS,
+    )
 
     if historical_df is None or historical_df.empty:
         st.info("No historical results loaded.")
         return
 
-    grades = [str(g) for g in range(9, 0, -1)] if mode == "GCSE" else ["A*", "A", "B", "C", "D", "E"]
+    cum_labels = GCSE_CUM_LABELS if mode == "GCSE" else ALEVEL_CUM_LABELS
+    top_label  = cum_labels[0]   # "9" or "A*"
+    mid_label  = cum_labels[2]   # "7+" or "A*-B"
 
     hist_agg = aggregate_historical(historical_df, mode)
     if hist_agg.empty:
@@ -700,86 +746,363 @@ def render_historical_comparison(
         )
         return
 
-    # ---- Summary table (one row per subject) ----
     years_present = sorted(historical_df["Year"].unique()) if "Year" in historical_df.columns else []
     if len(years_present) > 1:
         st.caption(f"Historical data covers: {', '.join(str(y) for y in years_present)}")
 
-    st.markdown("#### Target vs Historical Distribution")
+    st.markdown("#### Target vs Historical (cumulative %)")
     st.caption(
-        "Shows current target grade distribution alongside historical outcomes. "
+        "Cumulative % at or above each grade threshold. "
         "Δ = target% − historical%  (positive = targeting higher than historical)."
     )
 
-    # Compact view: highlight top grade and avg delta
     summary_rows = []
-    top_grade = grades[0]  # "9" or "A*"
     for _, row in cmp.iterrows():
-        t_top = row.get(f"{top_grade}_target%", 0)
-        h_top = row.get(f"{top_grade}_hist%", 0)
-        delta_top = row.get(f"{top_grade}_Δ", 0)
-        avg_t = row.get("avg_target", "")
-        avg_h = row.get("avg_hist", "")
-        avg_d = row.get("avg_Δ", "")
-
-        if isinstance(delta_top, (int, float)):
-            if delta_top > 5:
-                signal = "🔼 Higher"
-            elif delta_top < -5:
-                signal = "🔽 Lower"
-            else:
-                signal = "➡ Similar"
-        else:
-            signal = "—"
-
+        t_top = row.get(f"{top_label}_target%", 0)
+        h_top = row.get(f"{top_label}_hist%", 0)
+        d_top = row.get(f"{top_label}_Δ", 0)
+        t_mid = row.get(f"{mid_label}_target%", 0)
+        h_mid = row.get(f"{mid_label}_hist%", 0)
+        d_mid = row.get(f"{mid_label}_Δ", 0)
+        signal = "🔼 Higher" if isinstance(d_top, (int, float)) and d_top > 5 else (
+                 "🔽 Lower"  if isinstance(d_top, (int, float)) and d_top < -5 else "➡ Similar")
         summary_rows.append({
             "Subject": row["Subject"],
-            "n (targets)": int(row.get("n_students", 0)),
-            f"{top_grade} target%": f"{t_top:.0f}%",
-            f"{top_grade} hist%": f"{h_top:.0f}%",
-            f"{top_grade} Δ": f"{delta_top:+.1f}%" if isinstance(delta_top, (int, float)) else "—",
-            "Avg target": avg_t,
-            "Avg hist": avg_h,
-            "Avg Δ": f"{avg_d:+.2f}" if isinstance(avg_d, (int, float)) else "—",
+            "n": int(row.get("n_students", 0)),
+            f"{top_label} target": f"{t_top:.0f}%",
+            f"{top_label} hist":   f"{h_top:.0f}%",
+            f"{top_label} Δ":      f"{d_top:+.1f}%" if isinstance(d_top, (int, float)) else "—",
+            f"{mid_label} target": f"{t_mid:.0f}%",
+            f"{mid_label} hist":   f"{h_mid:.0f}%",
+            f"{mid_label} Δ":      f"{d_mid:+.1f}%" if isinstance(d_mid, (int, float)) else "—",
             "Trend": signal,
         })
 
     st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
 
-    # Per-subject drill-down
-    with st.expander("Subject drill-down (full grade breakdown)"):
+    with st.expander("Subject drill-down (all thresholds)"):
         subj_choices = cmp["Subject"].tolist()
         sel_subj = st.selectbox("Subject", subj_choices, key="hist_cmp_subj_sel")
         if sel_subj:
             subj_row = cmp[cmp["Subject"] == sel_subj].iloc[0]
             detail_rows = []
-            for g in grades:
-                t_pct = subj_row.get(f"{g}_target%", 0)
-                h_pct = subj_row.get(f"{g}_hist%", 0)
-                delta  = subj_row.get(f"{g}_Δ", 0)
+            for label in cum_labels:
+                t_pct = subj_row.get(f"{label}_target%", 0)
+                h_pct = subj_row.get(f"{label}_hist%", 0)
+                delta = subj_row.get(f"{label}_Δ", 0)
                 detail_rows.append({
-                    "Grade": g,
+                    "Threshold": label,
                     "Target %": f"{t_pct:.1f}%",
                     "Historical %": f"{h_pct:.1f}%",
                     "Δ": f"{delta:+.1f}%" if isinstance(delta, (int, float)) else "—",
                 })
-            st.dataframe(
-                pd.DataFrame(detail_rows),
-                use_container_width=True,
-                hide_index=True,
-            )
+            st.dataframe(pd.DataFrame(detail_rows), use_container_width=True, hide_index=True)
 
-    # Year-by-year view if multiple years
     if len(years_present) > 1:
         with st.expander("Year-by-year historical breakdown"):
-            subj_choices2 = sorted(
+            cum_cols = [f"cum_pct_{l}" for l in cum_labels]
+            overlap_subjects = sorted(
                 s for s in targets_df.columns
                 if s not in {"surname", "forename", "form", "year_group", "overall_score", "avg_gcse"}
                 and s in historical_df["Subject"].values
             )
-            if subj_choices2:
-                sel_subj2 = st.selectbox("Subject", subj_choices2, key="hist_year_subj_sel")
+            if overlap_subjects:
+                sel_subj2 = st.selectbox("Subject", overlap_subjects, key="hist_year_subj_sel")
                 yearly = historical_df[historical_df["Subject"] == sel_subj2]
                 if not yearly.empty:
-                    display_cols = ["Year"] + [g for g in grades if g in yearly.columns] + ["n"]
-                    st.dataframe(yearly[display_cols], use_container_width=True, hide_index=True)
+                    display_cols = ["Year"] + [c for c in cum_cols if c in yearly.columns] + ["n"]
+                    yearly_display = yearly[display_cols].copy()
+                    yearly_display.columns = [c.replace("cum_pct_", "") for c in yearly_display.columns]
+                    st.dataframe(yearly_display, use_container_width=True, hide_index=True)
+
+def render_target_explanation(
+    targets_df: pd.DataFrame,
+    mode: str,
+    session_state: dict,
+    key_prefix: str = "texpl_",
+) -> None:
+    """
+    Interactive target explanation selector: choose a student and subject to see
+    a breakdown of how their target was derived.
+
+    session_state should be st.session_state (passed in for testability).
+    """
+    from target_engine import ALEVEL_GRADE_MAP, ALEVEL_GRADES_ORDERED
+
+    meta_cols = {"surname", "forename", "form", "year_group", "overall_score", "avg_gcse"}
+    subj_cols = sorted([c for c in targets_df.columns if c not in meta_cols])
+    if not subj_cols:
+        st.info("No subject columns found in targets.")
+        return
+
+    students_sorted = sorted(
+        {(str(r["surname"]).strip(), str(r["forename"]).strip())
+         for _, r in targets_df.iterrows()
+         if pd.notna(r.get("surname")) and pd.notna(r.get("forename"))},
+        key=lambda x: (x[0].lower(), x[1].lower()),
+    )
+    if not students_sorted:
+        return
+
+    display_opts = [f"{sn.title()}, {fn.title()}" for sn, fn in students_sorted]
+    c1, c2 = st.columns(2)
+    with c1:
+        sel_idx = st.selectbox(
+            "Student",
+            range(len(display_opts)),
+            format_func=lambda i: display_opts[i],
+            key=f"{key_prefix}student",
+        )
+    with c2:
+        sel_subj = st.selectbox("Subject", subj_cols, key=f"{key_prefix}subject")
+
+    if sel_idx is None or not sel_subj:
+        return
+
+    sn, fn = students_sorted[sel_idx]
+    student_key = f"{sn.lower()}|{fn.lower()}"
+    display_name = f"{sn.title()} {fn.title()}"
+
+    # Look up current target for this student/subject
+    mask = (
+        (targets_df["surname"].str.lower() == sn.lower())
+        & (targets_df["forename"].str.lower() == fn.lower())
+    )
+    rows = targets_df[mask]
+    if rows.empty:
+        st.warning(f"Student {display_name} not found in targets DataFrame.")
+        return
+
+    row = rows.iloc[0]
+    target_val = row.get(sel_subj)
+    target_display = (
+        str(int(round(float(target_val)))) if mode == "GCSE" and pd.notna(target_val)
+        else (str(target_val) if pd.notna(target_val) else "N/A")
+    )
+    has_override = (
+        sel_subj in session_state.get("overrides", {}).get(student_key, {})
+    )
+
+    st.markdown(f"**{display_name} — {sel_subj}**")
+    st.markdown(f"**Target: {target_display}**{'  🔧 *(manually overridden)*' if has_override else ''}")
+    st.divider()
+
+    if mode == "GCSE":
+        _explain_gcse_target(sn, fn, student_key, sel_subj, target_val, session_state, targets_df)
+    else:
+        _explain_alevel_target(sn, fn, student_key, sel_subj, target_val, session_state, targets_df)
+
+
+def _explain_gcse_target(sn, fn, student_key, subject, target_val, ss, targets_df):
+    """Render GCSE target explanation."""
+    use_pred = ss.get("gcse_use_predictions", False) and ss.get("gcse_yellis_pred_data")
+
+    # Yellis baseline score
+    yellis_df = ss.get("gcse_yellis_df")
+    yellis_score = None
+    if yellis_df is not None:
+        mask = (
+            (yellis_df["surname"].str.lower() == sn.lower())
+            & (yellis_df["forename"].str.lower().str.startswith(fn.lower()[:3]))
+        )
+        m_rows = yellis_df[mask]
+        if not m_rows.empty:
+            yellis_score = m_rows.iloc[0].get("overall_score")
+
+    if yellis_score is not None:
+        st.metric("Yellis baseline score", f"{yellis_score:.1f}")
+
+    if use_pred:
+        # Yellis predictions mode
+        from gcse_predictions_adapter import YellisGCSELookup
+        pred_data = ss.get("gcse_yellis_pred_data", {})
+        pct = ss.get("gcse_yellis_pred_percentile", "standard")
+        src = ss.get("gcse_yellis_pred_source", "score")
+        bound = ss.get("gcse_yellis_pred_bound", "lower")
+
+        lookup = YellisGCSELookup(pred_data, percentile=pct, source=src, grade_bound=bound)
+        row_idx = lookup._resolve_name(student_key)
+        col_name = lookup._resolve_subject(subject)
+
+        st.markdown(f"**Method:** Yellis per-student predictions ({pct} percentile, {src} data)")
+
+        if row_idx is not None and col_name is not None and lookup._df is not None:
+            raw_val = lookup._df.at[row_idx, col_name]
+            if src == "score":
+                try:
+                    st.metric("Raw decimal prediction", f"{float(raw_val):.2f}")
+                    st.caption("Rounded to nearest integer grade.")
+                except (TypeError, ValueError):
+                    st.write(f"Raw value: {raw_val}")
+            else:
+                st.metric("Grade boundary", str(raw_val))
+                st.caption(f"Using {bound} bound of boundary pair.")
+        else:
+            st.warning(
+                "Student or subject not found in predictions file. "
+                "Grade may have been set to N/A or defaulted."
+            )
+
+        # Dept adjustment
+        dept_adj = ss.get("dept_adjustments", {}).get(subject, 0)
+        if dept_adj:
+            st.metric("Department adjustment", f"{dept_adj:+.1f} grades")
+        else:
+            st.caption("No department adjustment for this subject.")
+
+    else:
+        # Distribution mode
+        st.markdown("**Method:** Distribution curve (rank-based)")
+
+        subj_df = targets_df[targets_df[subject].notna()].copy() if subject in targets_df.columns else pd.DataFrame()
+        if yellis_score is not None and not subj_df.empty:
+            if "overall_score" in subj_df.columns:
+                subj_df_sorted = subj_df.sort_values("overall_score", ascending=False)
+                rank_vals = subj_df_sorted["overall_score"].tolist()
+                rank = next((i + 1 for i, s in enumerate(rank_vals) if abs(float(s or 0) - float(yellis_score or 0)) < 0.01), None)
+                n_subj = len(rank_vals)
+                if rank:
+                    st.metric("Rank in subject cohort", f"{rank} of {n_subj}")
+                    st.caption(
+                        f"Students are ranked by Yellis score. "
+                        f"The target grade distribution is applied across these {n_subj} students."
+                    )
+
+        dist = ss.get("distribution", {})
+        if dist:
+            st.markdown("**Grade distribution applied:**")
+            dist_rows = [{"Grade": g, "Proportion": f"{v:.0%}"} for g, v in sorted(dist.items(), reverse=True)]
+            st.dataframe(pd.DataFrame(dist_rows), hide_index=True, use_container_width=False)
+        else:
+            st.caption("No distribution configured — default used.")
+
+        dept_adj = ss.get("dept_adjustments", {}).get(subject, 0)
+        if dept_adj:
+            st.metric("Department adjustment", f"{dept_adj:+.1f} grades")
+        else:
+            st.caption("No department adjustment for this subject.")
+
+    # GCSE sub-score note
+    if ss.get("use_subscores", False):
+        weights = ss.get("subscore_weights", {})
+        st.caption(
+            "Sub-scores are weighted: "
+            + ", ".join(f"{k}={v:.0%}" for k, v in weights.items() if v)
+        )
+
+
+def _explain_alevel_target(sn, fn, student_key, subject, target_val, ss, targets_df):
+    """Render A Level target explanation."""
+    from target_engine import ALEVEL_GRADE_MAP, ALEVEL_GRADES_ORDERED
+
+    has_alis = ss.get("al_alis_data") is not None
+    has_composite = (
+        ss.get("al_yellis_df") is not None
+        and ss.get("al_gcse_wide_df") is not None
+    )
+
+    # ALIS score
+    alis_score = row_val = None
+    if "overall_score" in targets_df.columns:
+        mask = (
+            (targets_df["surname"].str.lower() == sn.lower())
+            & (targets_df["forename"].str.lower() == fn.lower())
+        )
+        m = targets_df[mask]
+        if not m.empty:
+            row_val = m.iloc[0].get("overall_score")
+            alis_score = row_val
+
+    avg_gcse = None
+    if "avg_gcse" in targets_df.columns:
+        mask = (
+            (targets_df["surname"].str.lower() == sn.lower())
+            & (targets_df["forename"].str.lower() == fn.lower())
+        )
+        m = targets_df[mask]
+        if not m.empty:
+            avg_gcse = m.iloc[0].get("avg_gcse")
+
+    if alis_score is not None and pd.notna(alis_score):
+        st.metric("ALIS score (baseline)", f"{alis_score:.1f}")
+    if avg_gcse is not None and pd.notna(avg_gcse):
+        st.metric("Average GCSE grade", f"{avg_gcse:.2f}")
+
+    if has_alis:
+        from alis_adapter import ALISLookup, DEFAULT_PROXY_MAP, ALIS_TO_APP
+        pct = ss.get("al_alis_percentile", "75th")
+        mode_str = ss.get("al_alis_mode", "direct")
+        proxy_map = dict(DEFAULT_PROXY_MAP)
+        proxy_map.update(ss.get("al_alis_proxy_map", {}))
+        match_overrides = ss.get("match_overrides", {})
+
+        st.markdown(f"**Method:** ALIS Adapt ({pct} percentile, {mode_str} mode)")
+
+        # Find the ALIS subject key for this subject
+        alis_subj_key = None
+        for app_subj, alis_subj in ALIS_TO_APP.items():
+            if alis_subj.lower() == subject.lower() or app_subj.lower() == subject.lower():
+                alis_subj_key = app_subj
+                break
+        if alis_subj_key is None:
+            # Try proxy map
+            for proxy_from, proxy_to in proxy_map.items():
+                if proxy_to.lower() == subject.lower():
+                    alis_subj_key = proxy_from
+                    break
+
+        alis_data = ss.get("al_alis_data")
+        if alis_data and alis_subj_key:
+            try:
+                lookup = ALISLookup(
+                    alis_data,
+                    percentile=pct,
+                    mode=mode_str,
+                    proxy_map=proxy_map,
+                )
+                # Resolve student key via match overrides
+                remap = {
+                    k[len("ALIS Adapt::"):]: v
+                    for k, v in match_overrides.items()
+                    if k.startswith("ALIS Adapt::")
+                    and v not in ("__UNMATCHED__", "__IGNORED__", "__DELETED__")
+                }
+                effective_key = remap.get(student_key, student_key)
+                raw_grade = lookup.get_grade(effective_key, subject)
+                if raw_grade is not None:
+                    st.metric("ALIS predicted grade", raw_grade)
+                else:
+                    st.caption(f"No ALIS prediction found for {subject} (key: {effective_key}).")
+            except Exception as e:
+                st.caption(f"Could not retrieve ALIS prediction: {e}")
+        else:
+            st.caption(f"Subject '{subject}' has no direct ALIS mapping.")
+
+    if has_composite and not has_alis:
+        st.markdown("**Method:** Composite (Yellis + GCSE baseline)")
+        blend_w = ss.get("al_alis_blend_weight", 0.5)
+        st.caption(
+            f"ALIS/Yellis weight: {blend_w:.0%}   GCSE baseline weight: {1 - blend_w:.0%}"
+        )
+
+    if has_alis and ss.get("al_gcse_baseline_data") is not None:
+        blend_w = ss.get("al_alis_blend_weight", 0.5)
+        if blend_w < 1.0:
+            st.caption(f"Blend: {blend_w:.0%} ALIS + {1 - blend_w:.0%} GCSE baseline.")
+
+    # Department adjustment
+    dept_adj = ss.get("dept_adjustments", {}).get(subject, 0)
+    if dept_adj:
+        try:
+            pre_adj_num = ALEVEL_GRADE_MAP.get(str(target_val))
+            if pre_adj_num is not None:
+                post_num = int(round(pre_adj_num - dept_adj))
+                post_num = max(1, min(6, post_num))
+                from target_engine import ALEVEL_GRADE_REVERSE
+                pre_grade = ALEVEL_GRADE_REVERSE.get(int(round(pre_adj_num)))
+                st.metric("Department adjustment", f"{dept_adj:+.1f}", help="Positive = grade boosted")
+                st.caption(f"Pre-adjustment grade would have been: {pre_grade}")
+        except Exception:
+            st.metric("Department adjustment", f"{dept_adj:+.1f} grades")
+    else:
+        st.caption("No department adjustment for this subject.")

@@ -62,6 +62,7 @@ from ui_components import (
     render_matching_dashboard,
     render_grade_distribution_chart,
     render_historical_comparison,
+    render_target_explanation,
 )
 from historical_adapter import parse_historical_results
 
@@ -81,9 +82,25 @@ sm.init_db()
 # Helper functions (must be defined before use in mode blocks below)
 # ---------------------------------------------------------------------------
 
+def _filter_deleted(df: pd.DataFrame, deleted_keys: set) -> pd.DataFrame:
+    """Remove rows whose surname|forename key is in deleted_keys."""
+    if not deleted_keys:
+        return df
+    key_col = (
+        df["surname"].astype(str).str.strip().str.lower()
+        + "|"
+        + df["forename"].astype(str).str.strip().str.lower()
+    )
+    return df[~key_col.isin(deleted_keys)].reset_index(drop=True)
+
+
 def _do_gcse_generate() -> None:
     with st.spinner("Generating GCSE targets..."):
         try:
+            deleted = st.session_state.get("gcse_deleted_students", set())
+            subject_list_df = _filter_deleted(
+                st.session_state["gcse_subject_list_df"], deleted
+            )
             use_pred = (
                 st.session_state.get("gcse_use_predictions", False)
                 and st.session_state.get("gcse_yellis_pred_data") is not None
@@ -97,13 +114,13 @@ def _do_gcse_generate() -> None:
                 )
                 engine = GCSEYellisDirectEngine(
                     lookup=lookup,
-                    subject_list_df=st.session_state["gcse_subject_list_df"],
+                    subject_list_df=subject_list_df,
                     dept_adjustments=st.session_state.get("dept_adjustments", {}),
                 )
             else:
                 engine = GCSETargetEngine(
                     yellis_df=st.session_state["gcse_yellis_df"],
-                    subject_list_df=st.session_state["gcse_subject_list_df"],
+                    subject_list_df=subject_list_df,
                     distribution=st.session_state.get("distribution", {}),
                     use_subscores=st.session_state.get("use_subscores", False),
                     subscore_weights=st.session_state.get("subscore_weights", {}),
@@ -122,6 +139,10 @@ def _do_gcse_generate() -> None:
 def _do_alevel_generate() -> None:
     with st.spinner("Generating A Level targets..."):
         try:
+            deleted = st.session_state.get("al_deleted_students", set())
+            al_subject_list_df = _filter_deleted(
+                st.session_state["al_subject_list_df"], deleted
+            )
             has_alis = st.session_state.get("al_alis_data") is not None
             has_composite = (
                 st.session_state.get("al_yellis_df") is not None
@@ -135,12 +156,14 @@ def _do_alevel_generate() -> None:
                 match_overrides = st.session_state.get("match_overrides", {})
 
                 # Build key remaps from confirmed match corrections
+                # Exclude __UNMATCHED__, __IGNORED__, __DELETED__ sentinels
+                _BAD_SENTINELS = {"__UNMATCHED__", "__IGNORED__", "__DELETED__"}
                 def _extract_remap(source_prefix: str) -> dict[str, str]:
                     prefix = f"{source_prefix}::"
                     return {
                         k[len(prefix):]: v
                         for k, v in match_overrides.items()
-                        if k.startswith(prefix) and v != "__UNMATCHED__"
+                        if k.startswith(prefix) and v not in _BAD_SENTINELS
                     }
 
                 alis_lookup = ALISLookup(
@@ -202,7 +225,7 @@ def _do_alevel_generate() -> None:
 
                 engine = ALevelALISEngine(
                     alis_lookup=lookup,
-                    subject_list_df=st.session_state["al_subject_list_df"],
+                    subject_list_df=al_subject_list_df,
                     yellis_df=st.session_state.get("al_yellis_df"),
                     gcse_wide_df=st.session_state.get("al_gcse_wide_df"),
                     mode=st.session_state.get("al_alis_mode", "direct"),
@@ -215,7 +238,7 @@ def _do_alevel_generate() -> None:
                 engine = ALevelTargetEngine(
                     yellis_df=st.session_state["al_yellis_df"],
                     gcse_wide_df=st.session_state["al_gcse_wide_df"],
-                    subject_list_df=st.session_state["al_subject_list_df"],
+                    subject_list_df=al_subject_list_df,
                     distribution=st.session_state.get("distribution", {}),
                     gcse_weight=st.session_state.get("gcse_weight", 0.80),
                     yellis_weight=st.session_state.get("yellis_weight", 0.20),
@@ -603,6 +626,9 @@ def _init_state() -> None:
         # Historical results
         "gcse_historical_df": None,
         "al_historical_df": None,
+        # Deleted students (from matching dashboard)
+        "gcse_deleted_students": set(),
+        "al_deleted_students": set(),
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -919,6 +945,7 @@ if mode == "GCSE":
                 source_keys=_gcse_src_keys,
                 ss_key="match_overrides",
                 key_prefix="gcse_md_",
+                deleted_ss_key="gcse_deleted_students",
             )
 
             _nav_buttons(back=False, forward_label="Next: Configure →", forward_key="gcse_s0")
@@ -1182,6 +1209,12 @@ if mode == "GCSE":
                         st.session_state["gcse_historical_df"],
                         mode="GCSE",
                     )
+
+            with st.expander("Explain a Target", expanded=False):
+                st.caption(
+                    "Select a student and subject to see a breakdown of how their target grade was derived."
+                )
+                render_target_explanation(df, "GCSE", st.session_state, key_prefix="texpl_gcse_")
 
             _nav_buttons(back=True, forward_label="Next: Export →", forward_key="gcse_s3")
 
@@ -1570,6 +1603,7 @@ else:
                 source_keys=al_source_keys,
                 ss_key="match_overrides",
                 key_prefix="al_md_",
+                deleted_ss_key="al_deleted_students",
             )
 
             _nav_buttons(back=False, forward_label="Next: Configure →", forward_key="al_s0")
@@ -1979,6 +2013,20 @@ else:
                     )
                 with st.expander("Grade Distribution Chart", expanded=False):
                     render_grade_distribution_chart(df, "AL")
+                # Warn about students with no avg_gcse (likely matching gap)
+                if "avg_gcse" in df.columns:
+                    _missing_gcse = df[df["avg_gcse"].isna()]
+                    if not _missing_gcse.empty and st.session_state.get("al_gcse_wide_df") is not None:
+                        _missing_names = [
+                            f"{r['surname'].title()} {r['forename'].title()}"
+                            for _, r in _missing_gcse.iterrows()
+                        ]
+                        st.warning(
+                            f"{len(_missing_gcse)} student(s) have no average GCSE — "
+                            f"they may not be matched to the GCSE grades file. "
+                            f"Return to Upload to fix matching: {', '.join(_missing_names[:5])}"
+                            + (f" … and {len(_missing_names) - 5} more" if len(_missing_names) > 5 else "")
+                        )
                 if st.session_state.get("al_historical_df") is not None:
                     with st.expander("Historical Comparison", expanded=False):
                         render_historical_comparison(
@@ -2031,6 +2079,12 @@ else:
                         st.session_state["al_historical_df"],
                         mode="AL",
                     )
+
+            with st.expander("Explain a Target", expanded=False):
+                st.caption(
+                    "Select a student and subject to see a breakdown of how their target grade was derived."
+                )
+                render_target_explanation(df, "AL", st.session_state, key_prefix="texpl_al_")
 
             _nav_buttons(back=True, forward_label="Next: Export →", forward_key="al_s3")
 
