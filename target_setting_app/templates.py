@@ -157,6 +157,42 @@ def template_gcse_grades() -> bytes:
     return buf.getvalue()
 
 
+def template_subject_list_timetable() -> bytes:
+    """
+    Subject list .xlsx — timetable format (Subject Name | Surname | PreName, sheet 'All').
+    Matches the iSams timetable export structure: headers in row 1, data from row 2.
+    Assembly, Registration, LifeEd, Games, and Learning Support rows are shown to illustrate
+    they are automatically ignored by the parser.
+    """
+    rows = [
+        ["Mathematics",        "Smith",   "Alice"],
+        ["Physics",            "Smith",   "Alice"],
+        ["Chemistry",          "Smith",   "Alice"],
+        ["Assembly",           "Smith",   "Alice"],
+        ["Mathematics",        "Jones",   "Thomas"],
+        ["History",            "Jones",   "Thomas"],
+        ["English Literature", "Jones",   "Thomas"],
+        ["Registration",       "Jones",   "Thomas"],
+        ["Biology",            "Okonkwo", "Chidera"],
+        ["Chemistry",          "Okonkwo", "Chidera"],
+        ["Economics",          "Okonkwo", "Chidera"],
+        ["LifeEd",             "Okonkwo", "Chidera"],
+    ]
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "All"
+
+    _hrow(ws, 1, ["Subject Name", "Surname", "PreName"])
+    for r, row in enumerate(rows, 2):
+        _srow(ws, r, row)
+
+    _autofit(ws)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 def template_subject_list_long() -> bytes:
     """
     Subject list CSV — long format (subjects comma-separated in one column).

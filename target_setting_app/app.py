@@ -42,6 +42,7 @@ from templates import (
     template_gcse_grades,
     template_subject_list_long,
     template_subject_list_wide,
+    template_subject_list_timetable,
 )
 from ui_components import (
     render_distribution_inputs,
@@ -408,7 +409,15 @@ _FORMAT_HINTS = {
     ),
     "subject_list": (
         "📋 **Expected format — Subject List (CSV or .xlsx)**\n\n"
-        "Two formats are supported:\n\n"
+        "Three formats are supported:\n\n"
+        "**Timetable format** (one row per student × subject — iSams timetable export):\n"
+        "| Subject Name | Surname | PreName |\n"
+        "|--------------|---------|----------|\n"
+        "| Mathematics | Smith | Alice |\n"
+        "| Physics | Smith | Alice |\n"
+        "| Mathematics | Jones | Thomas |\n\n"
+        "Sheet name should be **All**. Rows for Assembly, Registration, LifeEd, Games, and "
+        "Learning Support are automatically excluded.\n\n"
         "**Long format** (one subjects column):\n"
         "| Surname | Forename | Subjects |\n"
         "|---------|----------|----------|\n"
@@ -417,7 +426,7 @@ _FORMAT_HINTS = {
         "| Surname | Forename | Mathematics | Physics | Art |\n"
         "|---------|----------|-------------|---------|-----|\n"
         "| Smith | Alice | 1 | 1 | |\n\n"
-        "_Column headers must include Surname and Forename (or Last Name / First Name)._"
+        "_Column headers must include Surname and Forename (or Last Name / First Name / PreName)._"
     ),
     "alis_adapt": (
         "📋 **Expected format — ALIS Adapt file (.xls or .xlsx)**\n\n"
@@ -651,8 +660,16 @@ if mode == "GCSE":
         with col2:
             st.subheader("Student Subject List")
             _format_hint("subject_list")
-            c1, c2 = st.columns(2)
+            c1, c2, c3 = st.columns(3)
             with c1:
+                st.download_button(
+                    "📥 Timetable template",
+                    data=template_subject_list_timetable(),
+                    file_name="Template_SubjectList_Timetable.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="dl_tmpl_sl_timetable_gcse",
+                )
+            with c2:
                 st.download_button(
                     "📥 Long-format template",
                     data=template_subject_list_long(),
@@ -660,7 +677,7 @@ if mode == "GCSE":
                     mime="text/csv",
                     key="dl_tmpl_sl_long_gcse",
                 )
-            with c2:
+            with c3:
                 st.download_button(
                     "📥 Wide-format template",
                     data=template_subject_list_wide(),
@@ -1108,8 +1125,16 @@ else:
             st.subheader("Student Subject List")
             st.caption("Required for all modes — links students to their A Level subjects.")
             _format_hint("subject_list")
-            c1, c2 = st.columns(2)
+            c1, c2, c3 = st.columns(3)
             with c1:
+                st.download_button(
+                    "📥 Timetable template",
+                    data=template_subject_list_timetable(),
+                    file_name="Template_SubjectList_Timetable.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="dl_tmpl_sl_timetable_al",
+                )
+            with c2:
                 st.download_button(
                     "📥 Long template",
                     data=template_subject_list_long(),
@@ -1117,7 +1142,7 @@ else:
                     mime="text/csv",
                     key="dl_tmpl_sl_long_al",
                 )
-            with c2:
+            with c3:
                 st.download_button(
                     "📥 Wide template",
                     data=template_subject_list_wide(),

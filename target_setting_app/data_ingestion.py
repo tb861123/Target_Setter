@@ -288,17 +288,34 @@ _FORENAME_CANDIDATES = [
     "Forename", "forename", "First Name", "firstname", "first_name",
     "Firstname", "Given Name", "GivenName", "Pupil Forename",
     "Student Forename", "Preferred Name", "PreferredName",
+    "PreName", "Prename", "prename",
 ]
 _STUDENT_NAME_CANDIDATES = [
     "Student Name", "student_name", "Name", "name",
     "Pupil Name", "PupilName", "Full Name", "FullName",
 ]
 
+# Timetable format: one row per student × subject (Subject Name | Surname | PreName)
+_TIMETABLE_SUBJ_COL_CANDIDATES = ["Subject Name", "SubjectName"]
+
+# Subjects to exclude when reading timetable-format files
+_IGNORED_SUBJECTS_LOWER: frozenset[str] = frozenset({
+    "assembly", "registration", "lifeed", "games",
+    "learning support", "learing support",
+})
+
 
 def parse_subject_list(file) -> tuple[pd.DataFrame, str, list[str]]:
     """
     Parse student subject list file (CSV or Excel).
-    Auto-detects long (comma-separated subjects) or wide (binary columns) format.
+
+    Supports three formats:
+    - timetable: one row per student × subject (Subject Name | Surname | PreName).
+                 Reads the 'All' sheet by preference. Ignores Assembly, Registration,
+                 LifeEd, Games, and Learning Support rows.
+    - long:      one row per student, subjects comma-separated in a single column.
+    - wide:      one row per student, one binary column per subject.
+
     Returns (dataframe[surname, forename, subjects], format_detected, warnings).
     """
     warnings: list[str] = []
@@ -307,12 +324,31 @@ def parse_subject_list(file) -> tuple[pd.DataFrame, str, list[str]]:
     if fname.lower().endswith(".csv"):
         df = pd.read_csv(file)
     else:
-        df = pd.read_excel(file)
+        # Prefer the 'All' sheet (case-insensitive); fall back to first sheet
+        sheets = _available_sheets(file)
+        try:
+            file.seek(0)
+        except Exception:
+            pass
+        all_sheet = next((s for s in sheets if s.strip().lower() == "all"), None)
+        if all_sheet:
+            df = pd.read_excel(file, sheet_name=all_sheet)
+            if len(sheets) > 1:
+                warnings.append(f"Using sheet '{all_sheet}' (found {len(sheets)} sheets).")
+        else:
+            df = pd.read_excel(file)
 
     df.columns = [str(c).strip() for c in df.columns]
 
+    # ---- Timetable format detection ----------------------------------------
+    timetable_subj_col = _find_col(df, _TIMETABLE_SUBJ_COL_CANDIDATES)
     surname_col = _find_col(df, _SURNAME_CANDIDATES)
     forename_col = _find_col(df, _FORENAME_CANDIDATES)
+
+    if timetable_subj_col and surname_col and forename_col:
+        return _parse_timetable_format(df, timetable_subj_col, surname_col, forename_col, warnings)
+
+    # ---- Standard long / wide format ----------------------------------------
     student_name_col = _find_col(df, _STUDENT_NAME_CANDIDATES)
 
     if surname_col and forename_col:
@@ -333,8 +369,9 @@ def parse_subject_list(file) -> tuple[pd.DataFrame, str, list[str]]:
     else:
         raise ValueError(
             "Cannot find name columns. Expected 'Surname' + 'Forename' (or variants such as "
-            "'Last Name'/'First Name', 'Pupil Surname'/'Pupil Forename') or a single "
-            "'Student Name' / 'Name' column."
+            "'Last Name'/'First Name', 'Pupil Surname'/'Pupil Forename', 'PreName') or a single "
+            "'Student Name' / 'Name' column. For timetable-format files, a 'Subject Name' column "
+            "is also required."
         )
 
     non_name_cols = [c for c in df.columns if c not in ("surname", "forename")]
@@ -359,6 +396,56 @@ def parse_subject_list(file) -> tuple[pd.DataFrame, str, list[str]]:
     df = df.reset_index(drop=True)
 
     return df, format_detected, warnings
+
+
+def _parse_timetable_format(
+    df: pd.DataFrame,
+    subj_col: str,
+    surname_col: str,
+    forename_col: str,
+    warnings: list[str],
+) -> tuple[pd.DataFrame, str, list[str]]:
+    """
+    Handle Subject Name | Surname | PreName timetable format.
+    Groups rows by student, collecting subjects into a list.
+    Filters out ignored subjects (Assembly, Registration, etc.).
+    """
+    work = df[[subj_col, surname_col, forename_col]].copy()
+    work.columns = ["subject", "surname", "forename"]
+
+    work["subject"] = work["subject"].astype(str).str.strip()
+    work["surname"] = work["surname"].astype(str).str.strip()
+    work["forename"] = work["forename"].astype(str).str.strip()
+
+    # Drop rows with missing data
+    work = work[
+        (work["subject"].str.lower() != "nan")
+        & (work["surname"].str.lower() != "nan")
+        & (work["forename"].str.lower() != "nan")
+        & (work["subject"] != "")
+        & (work["surname"] != "")
+    ]
+
+    # Filter ignored subjects
+    ignored_mask = work["subject"].str.lower().isin(_IGNORED_SUBJECTS_LOWER)
+    n_ignored = ignored_mask.sum()
+    if n_ignored:
+        ignored_names = sorted(work.loc[ignored_mask, "subject"].unique())
+        warnings.append(
+            f"Ignored {n_ignored} rows for excluded subjects: {', '.join(ignored_names)}."
+        )
+    work = work[~ignored_mask]
+
+    # Group by student → sorted unique subject list
+    grouped = (
+        work.groupby(["surname", "forename"], sort=False)["subject"]
+        .apply(lambda s: sorted(set(s)))
+        .reset_index()
+        .rename(columns={"subject": "subjects"})
+    )
+    grouped = grouped.reset_index(drop=True)
+
+    return grouped, "timetable", warnings
 
 
 def _is_truthy(val) -> bool:
