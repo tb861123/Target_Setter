@@ -36,6 +36,13 @@ from alis_adapter import (
 )
 from subject_profiles import DEFAULT_PROFILES, ALL_A_LEVEL_SUBJECTS
 from export import export_gcse, export_alevel
+from templates import (
+    template_yellis_gcse,
+    template_yellis_alevel,
+    template_gcse_grades,
+    template_subject_list_long,
+    template_subject_list_wide,
+)
 from ui_components import (
     render_distribution_inputs,
     render_dept_adjustments,
@@ -289,6 +296,90 @@ def _render_weight_editor(weights: dict, key_prefix: str) -> dict:
     return new_weights
 
 
+def _sheet_picker(file, default_sheet: str, ss_key: str) -> str:
+    """
+    Return the sheet name to use.  If `default_sheet` is not found in the file,
+    shows the user a selectbox and stores the choice in session_state[ss_key].
+    """
+    from data_ingestion import _available_sheets
+    sheets = _available_sheets(file)
+    if not sheets or default_sheet in sheets:
+        return default_sheet
+    # case-insensitive match
+    lower = {s.lower(): s for s in sheets}
+    if default_sheet.lower() in lower:
+        return lower[default_sheet.lower()]
+    # Need user input
+    current = st.session_state.get(ss_key, sheets[0])
+    if current not in sheets:
+        current = sheets[0]
+    st.warning(
+        f"Sheet **'{default_sheet}'** not found. "
+        f"Available: `{'`, `'.join(sheets)}`. Please pick the correct sheet:"
+    )
+    chosen = st.selectbox("Sheet to use:", sheets, index=sheets.index(current), key=ss_key)
+    st.session_state[ss_key] = chosen
+    return chosen
+
+
+def _col_mapper_expander(
+    file,
+    sheet_name: str,
+    required_cols: list[str],
+    header_row: int,
+    ss_key: str,
+) -> dict[str, str] | None:
+    """
+    If file columns don't match required_cols, show a column-mapping expander.
+    Returns {standard_name: actual_col} or None if auto-mapping is fine.
+    """
+    try:
+        file.seek(0)
+    except Exception:
+        pass
+    try:
+        raw = pd.read_excel(file, sheet_name=sheet_name, header=header_row, nrows=0)
+        file.seek(0)
+    except Exception:
+        return None
+
+    actual_cols = raw.columns.tolist()
+    lower_actual = {c.lower(): c for c in actual_cols}
+
+    missing = [r for r in required_cols if r.lower() not in lower_actual]
+    if not missing:
+        return None  # auto-mapping will work
+
+    # Show mapper
+    saved = st.session_state.get(ss_key, {})
+    with st.expander(
+        f"Column mapping — {len(missing)} column(s) not found automatically",
+        expanded=True,
+    ):
+        st.caption(
+            f"Columns detected: `{'`, `'.join(actual_cols)}`. "
+            f"Map the missing columns below."
+        )
+        result = dict(saved)
+        col_widgets = st.columns(min(len(missing), 4))
+        for i, col_name in enumerate(missing):
+            with col_widgets[i % len(col_widgets)]:
+                options = ["(not present)"] + actual_cols
+                curr = result.get(col_name, saved.get(col_name, options[0]))
+                idx = options.index(curr) if curr in options else 0
+                sel = st.selectbox(f"{col_name}", options, index=idx, key=f"{ss_key}_{col_name}")
+                if sel != "(not present)":
+                    result[col_name] = sel
+                else:
+                    result.pop(col_name, None)
+
+        if st.button("Apply column mapping", key=f"{ss_key}_apply"):
+            st.session_state[ss_key] = result
+            st.rerun()
+
+    return st.session_state.get(ss_key) or None
+
+
 _FORMAT_HINTS = {
     "yellis_gcse": (
         "📋 **Expected format — Yellis GCSE file (.xlsx)**\n\n"
@@ -527,14 +618,26 @@ if mode == "GCSE":
         with col1:
             st.subheader("Yellis Baseline (Year 10)")
             _format_hint("yellis_gcse")
+            st.download_button(
+                "📥 Download template",
+                data=template_yellis_gcse(),
+                file_name="Template_Yellis_GCSE.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="dl_tmpl_yellis_gcse",
+            )
             yellis_file = st.file_uploader(
                 "Upload Yellis GCSE Excel (.xlsx)",
-                type=["xlsx"],
+                type=["xlsx", "xls"],
                 key="gcse_yellis_upload",
             )
             if yellis_file:
+                sheet = _sheet_picker(yellis_file, "Sheet1", "gcse_yellis_sheet")
                 try:
-                    df, warnings = parse_yellis_gcse(yellis_file)
+                    yellis_file.seek(0)
+                except Exception:
+                    pass
+                try:
+                    df, warnings = parse_yellis_gcse(yellis_file, sheet_name=sheet)
                     st.session_state["gcse_yellis_df"] = df
                     st.session_state["gcse_warnings"] = warnings
                     st.success(f"Loaded {len(df)} students.")
@@ -549,6 +652,23 @@ if mode == "GCSE":
         with col2:
             st.subheader("Student Subject List")
             _format_hint("subject_list")
+            c1, c2 = st.columns(2)
+            with c1:
+                st.download_button(
+                    "📥 Long-format template",
+                    data=template_subject_list_long(),
+                    file_name="Template_SubjectList_Long.csv",
+                    mime="text/csv",
+                    key="dl_tmpl_sl_long_gcse",
+                )
+            with c2:
+                st.download_button(
+                    "📥 Wide-format template",
+                    data=template_subject_list_wide(),
+                    file_name="Template_SubjectList_Wide.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="dl_tmpl_sl_wide_gcse",
+                )
             subj_file = st.file_uploader(
                 "Upload subject list (CSV or Excel)",
                 type=["csv", "xlsx", "xls"],
@@ -841,6 +961,10 @@ else:
         )
         if alis_file:
             try:
+                alis_file.seek(0)
+            except Exception:
+                pass
+            try:
                 alis_data, alis_warnings = parse_alis_adapt(alis_file)
                 st.session_state["al_alis_data"] = alis_data
                 st.session_state["al_use_alis"] = True
@@ -907,14 +1031,26 @@ else:
             st.subheader("Yellis Baseline (Year 12)")
             st.caption("Required for GCSE-composite mode; also provides baseline scores for ALIS mode.")
             _format_hint("yellis_alevel")
+            st.download_button(
+                "📥 Download template",
+                data=template_yellis_alevel(),
+                file_name="Template_Yellis_ALevel.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="dl_tmpl_yellis_al",
+            )
             yellis_file = st.file_uploader(
                 "Upload Yellis A Level Excel (.xlsx)",
-                type=["xlsx"],
+                type=["xlsx", "xls"],
                 key="al_yellis_upload",
             )
             if yellis_file:
+                sheet = _sheet_picker(yellis_file, "Data", "al_yellis_sheet")
                 try:
-                    df, warnings = parse_yellis_alevel(yellis_file)
+                    yellis_file.seek(0)
+                except Exception:
+                    pass
+                try:
+                    df, warnings = parse_yellis_alevel(yellis_file, sheet_name=sheet)
                     st.session_state["al_yellis_df"] = df
                     st.session_state["al_warnings"] = warnings
                     st.success(f"Loaded {len(df)} students.")
@@ -929,14 +1065,34 @@ else:
             st.subheader("GCSE Grades (iSams)")
             st.caption("Required for GCSE-composite mode.")
             _format_hint("gcse_grades")
+            st.download_button(
+                "📥 Download template",
+                data=template_gcse_grades(),
+                file_name="Template_GCSE_Grades.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="dl_tmpl_gcse_grades",
+            )
             gcse_file = st.file_uploader(
                 "Upload GCSE grades Excel (.xlsx)",
-                type=["xlsx"],
+                type=["xlsx", "xls"],
                 key="al_gcse_upload",
             )
             if gcse_file:
+                sheet = _sheet_picker(gcse_file, "iSams import", "al_gcse_sheet")
+                col_map = _col_mapper_expander(
+                    gcse_file, sheet,
+                    required_cols=["Surname", "Forename", "Subject", "Grade"],
+                    header_row=1,
+                    ss_key="al_gcse_col_map",
+                )
                 try:
-                    gcse_df, gcse_warnings = parse_gcse_grades(gcse_file)
+                    gcse_file.seek(0)
+                except Exception:
+                    pass
+                try:
+                    gcse_df, gcse_warnings = parse_gcse_grades(
+                        gcse_file, sheet_name=sheet, col_map=col_map
+                    )
                     st.session_state["al_gcse_wide_df"] = gcse_df
                     st.session_state["al_warnings"] = (
                         st.session_state.get("al_warnings", []) + gcse_warnings
@@ -953,6 +1109,23 @@ else:
             st.subheader("Student Subject List")
             st.caption("Required for all modes — links students to their A Level subjects.")
             _format_hint("subject_list")
+            c1, c2 = st.columns(2)
+            with c1:
+                st.download_button(
+                    "📥 Long template",
+                    data=template_subject_list_long(),
+                    file_name="Template_SubjectList_Long.csv",
+                    mime="text/csv",
+                    key="dl_tmpl_sl_long_al",
+                )
+            with c2:
+                st.download_button(
+                    "📥 Wide template",
+                    data=template_subject_list_wide(),
+                    file_name="Template_SubjectList_Wide.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="dl_tmpl_sl_wide_al",
+                )
             subj_file = st.file_uploader(
                 "Upload subject list (CSV or Excel)",
                 type=["csv", "xlsx", "xls"],

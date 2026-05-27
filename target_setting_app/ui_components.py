@@ -379,6 +379,42 @@ def render_matching_dashboard(
 
     st.warning(f"{len(issues)} student(s) have potential matching issues.")
 
+    # Bulk-approve button — auto-confirms all high-confidence fuzzy suggestions
+    n_confirmable = sum(
+        1
+        for _, row in issues.iterrows()
+        for src in sources
+        if row.get(f"{src}_status") in ("fuzzy", "possible")
+        and row.get(f"{src}_suggestion")
+        and row.get(f"{src}_score", 0) >= 0.85
+    )
+    if n_confirmable > 0:
+        c1, c2 = st.columns([2, 5])
+        with c1:
+            if st.button(
+                f"Auto-confirm {n_confirmable} suggestion(s)",
+                key=f"{key_prefix}bulk",
+                help="Accepts all suggested matches with ≥85% confidence. "
+                     "You can still override individual decisions below.",
+            ):
+                bulk = dict(current_overrides)
+                for _, row in issues.iterrows():
+                    mkey = row["master_key"]
+                    for src in sources:
+                        if row.get(f"{src}_status") not in ("fuzzy", "possible"):
+                            continue
+                        suggestion = row.get(f"{src}_suggestion")
+                        score = row.get(f"{src}_score", 0)
+                        if suggestion and score >= 0.85:
+                            bulk[f"{src}::{mkey}"] = suggestion
+                st.session_state[ss_key] = bulk
+                st.success(f"Confirmed {n_confirmable} match(es).")
+                st.rerun()
+        with c2:
+            st.caption(
+                "Or expand **Fix Matching Issues** below to review each one individually."
+            )
+
     # Issues summary table
     tbl_rows = []
     for _, row in issues.iterrows():
