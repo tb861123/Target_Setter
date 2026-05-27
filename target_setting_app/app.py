@@ -1590,6 +1590,18 @@ else:
                         "Further Maths at 90th while keeping everything else at 75th."
                     )
 
+                    # Build subjects_in_use2 and alis_subj_cols here so they're
+                    # available for both the override expander and the proxy section below.
+                    subjects_in_use2: set[str] = set()
+                    if has_subj:
+                        for subs in st.session_state["al_subject_list_df"]["subjects"]:
+                            subjects_in_use2.update(subs)
+
+                    sample_df2 = next(iter(alis_data.values()))
+                    alis_subj_cols = [
+                        c for c in sample_df2.columns if c not in ("_key", "_name", "baseline")
+                    ]
+
                     _spo = dict(st.session_state.get("al_subject_pct_overrides", {}))
                     _subjs_in_alis = sorted(
                         s for s in subjects_in_use2 if s in alis_subj_cols
@@ -1631,16 +1643,7 @@ else:
                         "Specify which ALIS subject to use as a proxy."
                     )
 
-                    # Subjects in use but not covered by ALIS
-                    subjects_in_use2: set[str] = set()
-                    if has_subj:
-                        for subs in st.session_state["al_subject_list_df"]["subjects"]:
-                            subjects_in_use2.update(subs)
-
-                    sample_df2 = next(iter(alis_data.values()))
-                    alis_subj_cols = [
-                        c for c in sample_df2.columns if c not in ("_key", "_name", "baseline")
-                    ]
+                    # subjects_in_use2 and alis_subj_cols already built above
 
                     proxy_map = dict(DEFAULT_PROXY_MAP)
                     proxy_map.update(st.session_state.get("al_alis_proxy_map", {}))
